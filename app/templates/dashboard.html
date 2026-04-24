@@ -4,8 +4,20 @@
 {% block content %}
 <header class="dashboard-header">
   <div>
-    <p class="caption label-tertiary">Signed in as</p>
-    <h1 class="title-2">{{ user.trakt_username or "Trakt user" }}</h1>
+    <p class="caption label-tertiary">Viewing as</p>
+    <h1 class="title-2">{{ user.display_name or user.trakt_username or "Trakt user" }}</h1>
+    {% if members and members|length > 1 %}
+    <form action="/dashboard/switch-member" method="post" class="member-switch">
+      <label class="caption label-tertiary" for="member-picker">Switch member</label>
+      <select id="member-picker" name="member_id" onchange="this.form.submit()">
+        {% for m in members %}
+          <option value="{{ m.id }}" {% if m.id == user.id %}selected{% endif %}>
+            {{ m.display_name or m.trakt_username or "Member" }}
+          </option>
+        {% endfor %}
+      </select>
+    </form>
+    {% endif %}
   </div>
   <a href="/signout" class="btn-link">Sign out</a>
 </header>

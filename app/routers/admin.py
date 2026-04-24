@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.database import session_scope
 from app.jobs.content_sync import run_content_sync
 from app.jobs.user_sync import sync_one_user
+from app.models.account import Account
 from app.models.content import ContentCatalog
 from app.models.user import User
 from app.services.recombee import get_recombee
@@ -105,7 +106,8 @@ async def admin_status(
     recombee = get_recombee()
 
     async with session_scope() as session:
-        user_count = await session.scalar(select(func.count()).select_from(User))
+        account_count = await session.scalar(select(func.count()).select_from(Account))
+        member_count = await session.scalar(select(func.count()).select_from(User))
         connected_count = await session.scalar(
             select(func.count()).select_from(User).where(
                 User.trakt_access_token_enc.is_not(None)
@@ -113,6 +115,16 @@ async def admin_status(
         )
         profile_ready_count = await session.scalar(
             select(func.count()).select_from(User).where(User.profile_ready.is_(True))
+        )
+        # Accounts with more than one member = active family setups
+        family_accounts_count = await session.scalar(
+            select(func.count()).select_from(
+                select(User.account_id)
+                .where(User.account_id.is_not(None))
+                .group_by(User.account_id)
+                .having(func.count() > 1)
+                .subquery()
+            )
         )
         last_user_sync = await session.scalar(select(func.max(User.last_history_sync)))
 
@@ -135,8 +147,12 @@ async def admin_status(
 
     return {
         "recombee": {"available": recombee.available},
-        "users": {
-            "total": user_count or 0,
+        "accounts": {
+            "total": account_count or 0,
+            "with_multiple_members": family_accounts_count or 0,
+        },
+        "members": {
+            "total": member_count or 0,
             "connected": connected_count or 0,
             "profile_ready": profile_ready_count or 0,
             "last_history_sync": last_user_sync.isoformat() if last_user_sync else None,
