@@ -69,4 +69,4 @@ Considered and rejected. A bounded JSON column on the `users` row:
 - Stays at `O(hundreds of bytes)` per user.
 
 A proper table would be warranted once we want per-device or
-per-endpoint analytics. That's [future work](../intro#where-to-go-next).
+per-endpoint analytics. That's future work.

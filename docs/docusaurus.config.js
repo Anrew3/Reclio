@@ -18,7 +18,11 @@ const config = {
   trailingSlash: false,
 
   onBrokenLinks: 'warn',
-  onBrokenMarkdownLinks: 'warn',
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: 'warn',
+    },
+  },
 
   i18n: {
     defaultLocale: 'en',
@@ -72,7 +76,7 @@ const config = {
           {
             title: 'Docs',
             items: [
-              { label: 'Introduction', to: '/intro' },
+              { label: 'Introduction', to: '/' },
               { label: 'Setup', to: '/setup' },
               { label: 'Configuration', to: '/configuration' },
             ],

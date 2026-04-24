@@ -75,7 +75,7 @@ async def _resolve_active_user(
     return result.scalar_one_or_none()
 
 
-@router.get("/", response_class=HTMLResponse)
+@router.get("/", response_class=HTMLResponse, response_model=None)
 async def landing(
     request: Request,
     session: AsyncSession = Depends(get_session),
@@ -115,7 +115,7 @@ async def signin() -> RedirectResponse:
     return RedirectResponse(url="/auth/trakt", status_code=302)
 
 
-@router.get("/auth/callback", response_class=HTMLResponse)
+@router.get("/auth/callback", response_class=HTMLResponse, response_model=None)
 async def auth_callback(
     request: Request,
     code: str | None = None,

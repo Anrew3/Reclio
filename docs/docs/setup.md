@@ -43,7 +43,7 @@ and the initial TMDB sync warms the catalog.
 
 ### Trakt
 
-1. Sign in at <https://trakt.tv/oauth/applications>.
+1. Sign in at [trakt.tv/oauth/applications](https://trakt.tv/oauth/applications).
 2. Click **New Application**.
 3. Set **Redirect URI** to `https://<your-domain>/auth/callback`.
 4. Copy **Client ID** → `TRAKT_CLIENT_ID`, **Client Secret** →
@@ -51,13 +51,13 @@ and the initial TMDB sync warms the catalog.
 
 ### TMDB
 
-1. Sign in at <https://www.themoviedb.org/settings/api>.
+1. Sign in at [themoviedb.org/settings/api](https://www.themoviedb.org/settings/api).
 2. Request an API key — the free Developer tier is plenty.
 3. Copy the **API Read Access Token (v3)** → `TMDB_API_KEY`.
 
 ### Recombee
 
-1. Sign up at <https://www.recombee.com/>.
+1. Sign up at [recombee.com](https://www.recombee.com/).
 2. Create a database — the free tier fits tens of thousands of items
    and millions of interactions.
 3. Copy **Database ID** → `RECOMBEE_DATABASE_ID`,
