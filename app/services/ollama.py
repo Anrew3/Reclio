@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -15,6 +16,29 @@ from app.config import get_settings
 from app.utils.cache import TTLCache
 
 logger = logging.getLogger(__name__)
+
+
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
+_WHITESPACE = re.compile(r"\s+")
+
+
+def sanitize_for_prompt(value: Any, max_len: int = 120) -> str:
+    """Defang user-controlled strings before interpolating into an LLM prompt.
+
+    - Collapses newlines/tabs/control-chars into single spaces so an attacker
+      can't use `\\n\\n Ignore previous instructions…` to break out of context.
+    - Strips common quote characters so they can't close a quoted segment.
+    - Truncates to max_len to bound prompt size.
+    """
+    if value is None:
+        return ""
+    text = str(value)
+    text = _CONTROL_CHARS.sub(" ", text)
+    text = text.replace("`", "'").replace('"', "'").replace("\\", "/")
+    text = _WHITESPACE.sub(" ", text).strip()
+    if len(text) > max_len:
+        text = text[: max_len - 1].rstrip() + "…"
+    return text
 
 
 class OllamaService:
@@ -66,18 +90,20 @@ class OllamaService:
 
         Returns the fallback f-string if Ollama is unavailable.
         """
-        fallback = f"Because You Watched {watched_title}"
-        if not watched_title:
+        safe_title = sanitize_for_prompt(watched_title, max_len=80)
+        safe_type = sanitize_for_prompt(media_type, max_len=20)
+        fallback = f"Because You Watched {safe_title}" if safe_title else "Because You Watched"
+        if not safe_title:
             return fallback
 
-        key = f"byw:{media_type}:{watched_title}"
+        key = f"byw:{safe_type}:{safe_title}"
         cached = self._cache.get(key)
         if cached:
             return cached
 
         prompt = (
             "You write short, catchy Netflix-style section titles.\n"
-            f"The viewer just finished the {media_type} '{watched_title}'.\n"
+            f"The viewer just finished the {safe_type} '{safe_title}'.\n"
             "Write ONE short section title (max 8 words) suggesting more of the "
             "same vibe. Examples: 'Because You Watched Inception', "
             "'Since You Loved Breaking Bad', 'More Like Ozark'.\n"
@@ -97,12 +123,20 @@ class OllamaService:
     async def generate_section_blurb(
         self, section_type: str, context: dict[str, Any]
     ) -> str | None:
-        """Optional one-sentence explanation for a section."""
-        ctx_str = ", ".join(f"{k}={v}" for k, v in context.items())
+        """Optional one-sentence explanation for a section.
+
+        `context` values may originate from user data — sanitize each one
+        before interpolating to mitigate prompt injection.
+        """
+        safe_type = sanitize_for_prompt(section_type, max_len=40)
+        safe_ctx = ", ".join(
+            f"{sanitize_for_prompt(k, max_len=30)}={sanitize_for_prompt(v, max_len=60)}"
+            for k, v in context.items()
+        )
         prompt = (
             "Write ONE short sentence (max 15 words) explaining why this "
             "recommendation section was shown to the viewer. Be casual and warm.\n"
-            f"Section: {section_type}\nContext: {ctx_str}\n"
+            f"Section: {safe_type}\nContext: {safe_ctx}\n"
             "Respond with ONLY the sentence."
         )
         result = await self._generate(prompt, max_tokens=40)

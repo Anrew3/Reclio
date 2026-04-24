@@ -8,9 +8,11 @@ refused — never allow unauthenticated admin access.
 from __future__ import annotations
 
 import logging
+import secrets
+import uuid
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Path, status
 from sqlalchemy import func, select
 
 from app.config import get_settings
@@ -33,11 +35,22 @@ def _require_admin(x_admin_token: str | None) -> None:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="admin endpoints disabled (ADMIN_TOKEN not configured)",
         )
-    if not x_admin_token or x_admin_token != configured:
+    # Constant-time comparison to block timing-leak attacks on the token
+    if not x_admin_token or not secrets.compare_digest(x_admin_token, configured):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid admin token",
         )
+
+
+def _validate_user_id(user_id: str) -> str:
+    try:
+        return str(uuid.UUID(user_id))
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="invalid user_id format",
+        ) from None
 
 
 async def _run_content_sync_safe() -> None:
@@ -66,17 +79,18 @@ async def trigger_content_sync(
 
 @router.post("/sync/user/{user_id}", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_user_sync(
-    user_id: str,
     background: BackgroundTasks,
+    user_id: str = Path(..., min_length=8, max_length=64),
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
 ) -> dict[str, str]:
     _require_admin(x_admin_token)
+    user_id = _validate_user_id(user_id)
     async with session_scope() as session:
         user = await session.get(User, user_id)
         if user is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"user {user_id} not found",
+                detail="user not found",
             )
     background.add_task(_run_user_sync_safe, user_id)
     return {"status": "scheduled", "job": "user_sync", "user_id": user_id}

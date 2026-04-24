@@ -22,6 +22,20 @@ from app.utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
 
+# Per-user sync locks. Prevents overlapping syncs (e.g. rapid manual refresh
+# clicks) from racing on the same user's TasteCache / Recombee state.
+_user_sync_locks: dict[str, asyncio.Lock] = {}
+_user_sync_locks_guard = asyncio.Lock()
+
+
+async def _get_user_sync_lock(user_id: str) -> asyncio.Lock:
+    async with _user_sync_locks_guard:
+        lock = _user_sync_locks.get(user_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _user_sync_locks[user_id] = lock
+        return lock
+
 
 def _normalize_trakt_rating(rating: int | float) -> float:
     """Trakt 1–10 → Recombee rating in [-1.0, 1.0]."""
@@ -189,56 +203,58 @@ async def _refresh_managed_list(
 
 
 async def sync_one_user(user_id: str) -> None:
-    """Full sync for a single user. Safe to call concurrently per-user."""
-    logger.info("user_sync: starting for %s", user_id)
+    """Full sync for a single user. Concurrent calls for the same user_id serialize."""
+    lock = await _get_user_sync_lock(user_id)
+    async with lock:
+        logger.info("user_sync: starting for %s", user_id)
 
-    async with session_scope() as session:
-        user = await session.get(User, user_id)
-        if not user or not user.trakt_access_token_enc:
-            logger.debug("user_sync: user %s missing or not connected", user_id)
-            return
-        token = decrypt(user.trakt_access_token_enc)
-        if not token:
-            logger.warning("user_sync: cannot decrypt token for %s", user_id)
-            return
+        async with session_scope() as session:
+            user = await session.get(User, user_id)
+            if not user or not user.trakt_access_token_enc:
+                logger.debug("user_sync: user %s missing or not connected", user_id)
+                return
+            token = decrypt(user.trakt_access_token_enc)
+            if not token:
+                logger.warning("user_sync: cannot decrypt token for %s", user_id)
+                return
 
-        # 1. Build taste profile (uses its own commits internally)
-        try:
-            await build_taste_profile(session, user_id, user.trakt_access_token_enc)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("user_sync: taste_profile failed for %s: %s", user_id, exc)
-
-        last_sync = user.last_history_sync
-        new_cutoff = await _push_interactions(user_id, token, last_sync)
-
-        # 2. Pull recommendations from Recombee
-        recombee = get_recombee()
-        movie_recs: list[str] = []
-        show_recs: list[str] = []
-        if recombee.available:
+            # 1. Build taste profile (uses its own commits internally)
             try:
-                movie_recs, show_recs = await asyncio.gather(
-                    recombee.get_recommendations(user_id, count=50, filter_media_type="movie"),
-                    recombee.get_recommendations(user_id, count=50, filter_media_type="tv"),
+                await build_taste_profile(session, user_id, user.trakt_access_token_enc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("user_sync: taste_profile failed for %s: %s", user_id, exc)
+
+            last_sync = user.last_history_sync
+            new_cutoff = await _push_interactions(user_id, token, last_sync)
+
+            # 2. Pull recommendations from Recombee
+            recombee = get_recombee()
+            movie_recs: list[str] = []
+            show_recs: list[str] = []
+            if recombee.available:
+                try:
+                    movie_recs, show_recs = await asyncio.gather(
+                        recombee.get_recommendations(user_id, count=50, filter_media_type="movie"),
+                        recombee.get_recommendations(user_id, count=50, filter_media_type="tv"),
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("user_sync: recombee recs failed for %s: %s", user_id, exc)
+
+            # 3. Push recs to Trakt managed lists
+            try:
+                await asyncio.gather(
+                    _refresh_managed_list(user, token, user.trakt_rec_movies_list_id, movie_recs, "movies"),
+                    _refresh_managed_list(user, token, user.trakt_rec_shows_list_id, show_recs, "shows"),
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.warning("user_sync: recombee recs failed for %s: %s", user_id, exc)
+                logger.warning("user_sync: list refresh failed for %s: %s", user_id, exc)
 
-        # 3. Push recs to Trakt managed lists
-        try:
-            await asyncio.gather(
-                _refresh_managed_list(user, token, user.trakt_rec_movies_list_id, movie_recs, "movies"),
-                _refresh_managed_list(user, token, user.trakt_rec_shows_list_id, show_recs, "shows"),
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("user_sync: list refresh failed for %s: %s", user_id, exc)
+            user.profile_ready = True
+            user.last_history_sync = new_cutoff
+            user.last_seen = datetime.utcnow()
+            await session.commit()
 
-        user.profile_ready = True
-        user.last_history_sync = new_cutoff
-        user.last_seen = datetime.utcnow()
-        await session.commit()
-
-    logger.info("user_sync: finished for %s", user_id)
+        logger.info("user_sync: finished for %s", user_id)
 
 
 async def run_user_sync() -> dict[str, int]:
