@@ -51,6 +51,14 @@ async def _migrate_add_user_account_columns(conn) -> None:
     if "display_name" not in existing_cols:
         await conn.execute(text("ALTER TABLE users ADD COLUMN display_name VARCHAR"))
         logger.info("migration: added users.display_name column")
+    if "recent_feed_hits" not in existing_cols:
+        await conn.execute(text("ALTER TABLE users ADD COLUMN recent_feed_hits JSON"))
+        logger.info("migration: added users.recent_feed_hits column")
+    if "last_feed_request_at" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN last_feed_request_at DATETIME")
+        )
+        logger.info("migration: added users.last_feed_request_at column")
 
 
 async def _backfill_accounts_for_orphan_users() -> None:

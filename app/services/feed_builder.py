@@ -158,10 +158,13 @@ async def build_feeds(
         })
 
     # 4 - Because You Watched [Last Movie]
+    # ID embeds the movie TMDB id so Chillio treats a new watched movie
+    # as a new feed rather than overwriting the old one. Title is
+    # presentation-only (LLM-generated or f-string fallback).
     if last_movie_id and last_movie_title:
         byw_movie_title = byw_titles.get("movie") or f"Because You Watched {last_movie_title}"
         feeds.append({
-            "id": "because_watched_movie",
+            "id": f"because_watched_movie_tmdb_{last_movie_id}",
             "title": byw_movie_title,
             "source": "tmdb_query",
             "source_metadata": {
@@ -172,7 +175,7 @@ async def build_feeds(
         })
     else:
         feeds.append({
-            "id": "because_watched_movie",
+            "id": "because_watched_movie",  # stable fallback id for unknown-user case
             "title": "More Movies To Discover",
             "source": "tmdb_query",
             "source_metadata": {"path": "/movie/popular", "parameters": ""},
@@ -183,7 +186,7 @@ async def build_feeds(
     if last_show_id and last_show_title:
         byw_show_title = byw_titles.get("show") or f"Because You Watched {last_show_title}"
         feeds.append({
-            "id": "because_watched_show",
+            "id": f"because_watched_show_tmdb_{last_show_id}",
             "title": byw_show_title,
             "source": "tmdb_query",
             "source_metadata": {
@@ -194,7 +197,7 @@ async def build_feeds(
         })
     else:
         feeds.append({
-            "id": "because_watched_show",
+            "id": "because_watched_show",  # stable fallback id
             "title": "More Shows To Discover",
             "source": "tmdb_query",
             "source_metadata": {"path": "/tv/popular", "parameters": ""},

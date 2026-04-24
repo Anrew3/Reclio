@@ -9,7 +9,7 @@ ripple into the public protocol for no gain.
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -44,5 +44,12 @@ class User(Base):
     last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_history_sync: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     profile_ready: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # --- Activity-driven adaptive sync ---------------------------------
+    # Rolling log of recent /feeds request timestamps (ISO strings), trimmed
+    # to the most recent 50 entries. The user-sync sweep reads this to
+    # decide whether to sync a given user hot / default / cold cadence.
+    recent_feed_hits: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    last_feed_request_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     __table_args__ = (Index("ix_users_account_id", "account_id"),)

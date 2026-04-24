@@ -258,8 +258,23 @@ async def sync_one_user(user_id: str) -> None:
 
 
 async def run_user_sync() -> dict[str, int]:
-    """Sweep all users that need syncing."""
-    stats = {"total": 0, "succeeded": 0, "failed": 0}
+    """Sweep all users that need syncing.
+
+    Each user gets an *adaptive* cadence: heavy users of /feeds get the
+    hot interval, dormant users get the cold interval, everyone else the
+    default. The sweep itself runs every `user_sync_sweep_interval_hours`
+    and picks which users actually need work this tick.
+    """
+    from app.config import get_settings
+    from app.services.activity import adaptive_sync_interval_hours
+
+    settings = get_settings()
+    stats = {
+        "total": 0, "succeeded": 0, "failed": 0,
+        "hot": 0, "default": 0, "cold": 0,
+    }
+    now = datetime.utcnow()
+
     async with session_scope() as session:
         q = select(User).where(User.trakt_access_token_enc.is_not(None))
         result = await session.execute(q)
@@ -268,13 +283,24 @@ async def run_user_sync() -> dict[str, int]:
         stale_user_ids: list[str] = []
         for user in users:
             cache = await session.get(TasteCache, user.id)
-            if (
+            interval_hours = adaptive_sync_interval_hours(user)
+
+            # Book-keeping so operators can see the distribution in logs.
+            if interval_hours == settings.user_sync_hot_interval_hours:
+                stats["hot"] += 1
+            elif interval_hours == settings.user_sync_cold_interval_hours:
+                stats["cold"] += 1
+            else:
+                stats["default"] += 1
+
+            needs_sync = (
                 not user.profile_ready
                 or cache is None
                 or cache.is_stale
                 or (cache.computed_at is None)
-                or (cache.computed_at < datetime.utcnow() - timedelta(hours=4))
-            ):
+                or (cache.computed_at < now - timedelta(hours=interval_hours))
+            )
+            if needs_sync:
                 stale_user_ids.append(user.id)
 
     stats["total"] = len(stale_user_ids)

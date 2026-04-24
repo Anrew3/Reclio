@@ -50,11 +50,13 @@ async def lifespan(app: FastAPI):
             logger.warning("Recombee schema init failed: %s", exc)
 
         try:
-            from app.services.ollama import get_ollama
+            from app.services.llm import get_llm
 
-            await get_ollama().ensure_model_pulled()
+            llm = get_llm()
+            logger.info("LLM provider: %s (enabled=%s)", llm.name, llm.enabled)
+            await llm.warmup()
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Ollama warmup failed: %s", exc)
+            logger.warning("LLM warmup failed: %s", exc)
 
     asyncio.create_task(_warmup())
 

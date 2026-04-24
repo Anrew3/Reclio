@@ -20,3 +20,8 @@ data/caddy/
 .vscode/
 *.log
 preview/
+
+# Docusaurus
+docs/node_modules/
+docs/build/
+docs/.docusaurus/

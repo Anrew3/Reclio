@@ -38,9 +38,11 @@ def start_scheduler() -> AsyncIOScheduler:
         coalesce=True,
     )
 
+    # Sweep wakes up frequently; the per-user cadence decision is made
+    # inside run_user_sync based on recent /feeds activity.
     scheduler.add_job(
         run_user_sync,
-        trigger=IntervalTrigger(hours=settings.user_sync_interval_hours),
+        trigger=IntervalTrigger(hours=settings.user_sync_sweep_interval_hours),
         id="user_sync",
         replace_existing=True,
         max_instances=1,

@@ -1,0 +1,38 @@
+/**
+ * Reclio docs theme: iOS-ish dark default, soft accents.
+ */
+
+:root {
+  --ifm-color-primary: #7b5cff;
+  --ifm-color-primary-dark: #5f3ff2;
+  --ifm-color-primary-darker: #5534e8;
+  --ifm-color-primary-darkest: #4627c4;
+  --ifm-color-primary-light: #8f74ff;
+  --ifm-color-primary-lighter: #9c85ff;
+  --ifm-color-primary-lightest: #baa9ff;
+  --ifm-code-font-size: 93%;
+  --docusaurus-highlighted-code-line-bg: rgba(123, 92, 255, 0.1);
+  --ifm-font-family-base: -apple-system, BlinkMacSystemFont, "SF Pro Text",
+    "Segoe UI", Roboto, sans-serif;
+  --ifm-heading-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
+    "Segoe UI", Roboto, sans-serif;
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #9c85ff;
+  --ifm-color-primary-dark: #8268ff;
+  --ifm-color-primary-darker: #755aff;
+  --ifm-color-primary-darkest: #5234ff;
+  --ifm-color-primary-light: #b6a2ff;
+  --ifm-color-primary-lighter: #c3b1ff;
+  --ifm-color-primary-lightest: #e1d8ff;
+  --ifm-background-color: #0b0b10;
+  --ifm-background-surface-color: #131319;
+  --docusaurus-highlighted-code-line-bg: rgba(156, 133, 255, 0.15);
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3 {
+  letter-spacing: -0.015em;
+}
