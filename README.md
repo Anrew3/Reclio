@@ -53,6 +53,31 @@ taste profile builds, then pull-to-refresh.
 
 ---
 
+## Documentation
+
+Full docs live in [`docs/`](docs/) and are published as a Docusaurus
+site at **[anrew3.github.io/reclio](https://anrew3.github.io/reclio/)**
+(auto-deployed from `main`).
+
+| Section | What's there |
+| --- | --- |
+| [Introduction](docs/docs/intro.md) | What Reclio is and what you get |
+| [Setup](docs/docs/setup.md) | Docker Compose + local development |
+| [Configuration](docs/docs/configuration.md) | Every env var explained |
+| [Model integrations](docs/docs/model-integrations.md) | Ollama · Claude · OpenAI |
+| [Recombee](docs/docs/recombee.md) | Collaborative-filtering deep-dive |
+| [API reference](docs/docs/api-reference.md) | `/manifest`, `/feeds`, `/admin/*` |
+| [Adaptive sync](docs/docs/adaptive-sync.md) | How sync cadence auto-tunes |
+| [Caddy vs Traefik](docs/docs/caddy-vs-traefik.md) | Reverse-proxy trade-offs |
+
+Run the docs locally:
+
+```bash
+cd docs && npm install && npm start   # http://localhost:3000
+```
+
+---
+
 ## Self-host
 
 You need Docker, a domain name, and four free API keys: Trakt, TMDB,
@@ -263,12 +288,6 @@ uvicorn app.main:app --reload --port 8000
 For local OAuth testing, tunnel with
 [`cloudflared`](https://github.com/cloudflare/cloudflared) or
 [`ngrok`](https://ngrok.com/) and set `BASE_URL` to the tunnel URL.
-
-### Docs site
-
-```bash
-cd docs && npm install && npm start   # http://localhost:3000
-```
 
 ---
 
