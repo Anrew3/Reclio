@@ -56,7 +56,7 @@ taste profile builds, then pull-to-refresh.
 ## Documentation
 
 Full docs live in [`docs/`](docs/) and are published as a Docusaurus
-site at **[anrew3.github.io/reclio](https://anrew3.github.io/reclio/)**
+site at **[anrew3.github.io/Reclio](https://anrew3.github.io/Reclio/)**
 (auto-deployed from `main`).
 
 | Section | What's there |

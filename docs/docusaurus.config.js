@@ -10,10 +10,10 @@ const config = {
   favicon: 'img/favicon.ico',
 
   url: 'https://anrew3.github.io',
-  baseUrl: '/reclio/',
+  baseUrl: '/Reclio/',
 
   organizationName: 'Anrew3',
-  projectName: 'reclio',
+  projectName: 'Reclio',
   deploymentBranch: 'gh-pages',
   trailingSlash: false,
 
