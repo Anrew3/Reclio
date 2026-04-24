@@ -21,6 +21,12 @@ from app.models.user import User
 from app.services.tmdb import MOVIE_GENRES, TV_GENRES
 from app.services.trakt import get_trakt
 from app.utils.crypto import encrypt
+from app.utils.session import (
+    SESSION_COOKIE,
+    SESSION_MAX_AGE,
+    create_session_token,
+    read_session_token,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +37,22 @@ router = APIRouter(tags=["portal"])
 _STATE_COOKIE = "reclio_oauth_state"
 
 
+def _current_user_id(request: Request) -> str | None:
+    """Return the authenticated user_id from the signed session cookie, or None."""
+    return read_session_token(request.cookies.get(SESSION_COOKIE))
+
+
 @router.get("/", response_class=HTMLResponse)
-async def landing(request: Request) -> HTMLResponse:
+async def landing(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> HTMLResponse | RedirectResponse:
+    # If signed in with a still-valid user, send straight to dashboard
+    user_id = _current_user_id(request)
+    if user_id:
+        user = await session.get(User, user_id)
+        if user is not None:
+            return RedirectResponse(url="/dashboard", status_code=302)
     return templates.TemplateResponse(
         "index.html",
         {"request": request, "settings": get_settings()},
@@ -54,6 +74,12 @@ async def auth_trakt_start() -> RedirectResponse:
         max_age=600,
     )
     return response
+
+
+@router.get("/signin")
+async def signin() -> RedirectResponse:
+    """Alias that kicks off the Trakt OAuth flow for returning users."""
+    return RedirectResponse(url="/auth/trakt", status_code=302)
 
 
 @router.get("/auth/callback", response_class=HTMLResponse)
@@ -181,16 +207,17 @@ async def auth_callback(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to schedule initial sync: %s", exc)
 
-    # Redirect to dashboard with a signed cookie identifying the user
+    # Redirect to dashboard with a signed session cookie
     response = RedirectResponse(url="/dashboard", status_code=302)
     response.delete_cookie(_STATE_COOKIE)
+    response.delete_cookie("reclio_user")  # sunset legacy unsigned cookie
     response.set_cookie(
-        "reclio_user",
-        user.id,
+        SESSION_COOKIE,
+        create_session_token(user.id),
         httponly=True,
         secure=True,
         samesite="lax",
-        max_age=60 * 60 * 24 * 365,
+        max_age=SESSION_MAX_AGE,
     )
     return response
 
@@ -219,13 +246,15 @@ async def dashboard(
     session: AsyncSession = Depends(get_session),
 ) -> HTMLResponse:
     settings = get_settings()
-    user_id = request.cookies.get("reclio_user")
+    user_id = _current_user_id(request)
     if not user_id:
         return RedirectResponse(url="/", status_code=302)
 
     user = await session.get(User, user_id)
     if user is None:
-        return RedirectResponse(url="/", status_code=302)
+        response = RedirectResponse(url="/", status_code=302)
+        response.delete_cookie(SESSION_COOKIE)
+        return response
 
     taste = await session.get(TasteCache, user_id)
 
@@ -252,7 +281,7 @@ async def dashboard_refresh(
     request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> RedirectResponse:
-    user_id = request.cookies.get("reclio_user")
+    user_id = _current_user_id(request)
     if not user_id:
         return RedirectResponse(url="/", status_code=303)
 
@@ -275,8 +304,10 @@ async def dashboard_refresh(
     return RedirectResponse(url="/dashboard", status_code=303)
 
 
+@router.get("/signout")
 @router.get("/logout")
-async def logout() -> RedirectResponse:
+async def signout() -> RedirectResponse:
     response = RedirectResponse(url="/", status_code=302)
-    response.delete_cookie("reclio_user")
+    response.delete_cookie(SESSION_COOKIE)
+    response.delete_cookie("reclio_user")  # sweep any legacy cookie
     return response
