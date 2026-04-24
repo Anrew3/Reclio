@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block title %}Reclio — Netflix-style recommendations for Chillio{% endblock %}
+
+{% block content %}
+<header class="hero">
+  <div class="logo">
+    <img src="/static/img/logo.svg" alt="Reclio" width="72" height="72">
+  </div>
+  <h1 class="large-title">Reclio</h1>
+  <p class="hero-subtitle">Netflix-style recommendations for Chillio</p>
+</header>
+
+<section class="features">
+  <div class="feature">
+    <div class="feature-icon" aria-hidden="true">
+      <svg viewBox="0 0 28 28" width="28" height="28" fill="none">
+        <path d="M14 4 L22 8 V16 C22 20 14 24 14 24 C14 24 6 20 6 16 V8 Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="feature-text">
+      <h3 class="headline">Your Trakt, understood</h3>
+      <p class="callout">We learn your taste from thousands of ratings and watches — genres, actors, directors, the decade you love.</p>
+    </div>
+  </div>
+
+  <div class="feature">
+    <div class="feature-icon" aria-hidden="true">
+      <svg viewBox="0 0 28 28" width="28" height="28" fill="none">
+        <path d="M4 14 L10 20 L24 6" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <div class="feature-text">
+      <h3 class="headline">Personalized recommendations</h3>
+      <p class="callout">A ChillLink addon for Chillio — your home feeds are re-ranked every time you open the app.</p>
+    </div>
+  </div>
+
+  <div class="feature">
+    <div class="feature-icon" aria-hidden="true">
+      <svg viewBox="0 0 28 28" width="28" height="28" fill="none">
+        <circle cx="14" cy="14" r="10" stroke="currentColor" stroke-width="2"/>
+        <path d="M14 8 V14 L18 16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+    </div>
+    <div class="feature-text">
+      <h3 class="headline">Always up to date</h3>
+      <p class="callout">We sync in the background so every time you open Chillio, your feeds reflect what you've been watching.</p>
+    </div>
+  </div>
+</section>
+
+<section class="cta">
+  <a href="/auth/trakt" class="btn btn-primary">Connect with Trakt</a>
+  <p class="footnote">You'll be redirected to Trakt.tv to authorize.</p>
+</section>
+{% endblock %}

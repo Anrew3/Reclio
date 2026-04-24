@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — Reclio{% endblock %}
+
+{% block content %}
+<header class="dashboard-header">
+  <div>
+    <p class="caption label-tertiary">Signed in as</p>
+    <h1 class="title-2">{{ user.trakt_username or "Trakt user" }}</h1>
+  </div>
+  <a href="/logout" class="btn-link">Log out</a>
+</header>
+
+<section class="ios-card url-card">
+  <p class="subheadline label-secondary">Your Chillio Addon URL</p>
+  <div class="url-row">
+    <code id="addon-url" class="addon-url">{{ addon_url }}</code>
+    <button type="button" class="btn btn-secondary copy-btn" data-copy-target="#addon-url">Copy</button>
+  </div>
+  <p class="footnote">Add this in Chillio → Settings → ChillLink Servers.</p>
+</section>
+
+<section class="ios-card status-card">
+  {% if user.profile_ready and taste %}
+    <div class="status-row">
+      <div>
+        <p class="headline">Recommendations ready</p>
+        <p class="caption label-tertiary">
+          {% if taste.computed_at %}
+            Last synced {{ taste.computed_at.strftime('%b %d, %Y at %H:%M UTC') }}
+          {% else %}
+            Sync pending
+          {% endif %}
+        </p>
+      </div>
+      <form action="/dashboard/refresh" method="post">
+        <button type="submit" class="btn btn-secondary">Refresh Now</button>
+      </form>
+    </div>
+  {% else %}
+    <div class="status-row">
+      <div class="loading">
+        <div class="spinner" aria-hidden="true"></div>
+        <p class="headline">Building your taste profile…</p>
+      </div>
+      <p class="caption label-tertiary">This usually takes 1–2 minutes after connecting.</p>
+    </div>
+  {% endif %}
+</section>
+
+{% if taste %}
+<section class="ios-card taste-card">
+  <h3 class="title-3">Your Taste</h3>
+
+  {% if movie_genres %}
+  <div class="taste-section">
+    <p class="subheadline label-secondary">Top movie genres</p>
+    <div class="pill-row">
+      {% for g in movie_genres %}
+        <span class="genre-pill {% if loop.index == 1 %}top{% endif %}">{{ g.name }}</span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if show_genres %}
+  <div class="taste-section">
+    <p class="subheadline label-secondary">Top show genres</p>
+    <div class="pill-row">
+      {% for g in show_genres %}
+        <span class="genre-pill {% if loop.index == 1 %}top{% endif %}">{{ g.name }}</span>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if top_actors %}
+  <div class="taste-section">
+    <p class="subheadline label-secondary">Top actors</p>
+    <div class="actor-list">
+      {% for actor in top_actors %}
+      <div class="actor-chip">
+        <div class="actor-avatar">{{ actor.name[0] }}</div>
+        <span class="actor-name">{{ actor.name }}</span>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if preferred_decade %}
+  <div class="taste-section decade-section">
+    <p class="subheadline label-secondary">Era preference</p>
+    <p class="title-3">You love {{ preferred_decade }}s films</p>
+  </div>
+  {% endif %}
+
+  <div class="taste-stats">
+    <div class="stat">
+      <p class="stat-value">{{ total_movies }}</p>
+      <p class="stat-label">movies watched</p>
+    </div>
+    <div class="stat">
+      <p class="stat-value">{{ total_shows }}</p>
+      <p class="stat-label">shows watched</p>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+<section class="footer-actions">
+  <a href="/auth/trakt" class="btn-link">Reconnect Trakt</a>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  document.querySelectorAll('.copy-btn').forEach(function(btn){
+    btn.addEventListener('click', async function(){
+      const sel = btn.getAttribute('data-copy-target');
+      const el = document.querySelector(sel);
+      if (!el) return;
+      try {
+        await navigator.clipboard.writeText(el.textContent.trim());
+        const original = btn.textContent;
+        btn.textContent = 'Copied';
+        btn.classList.add('copied');
+        setTimeout(function(){
+          btn.textContent = original;
+          btn.classList.remove('copied');
+        }, 1400);
+      } catch(e) {
+        const r = document.createRange();
+        r.selectNode(el);
+        window.getSelection().removeAllRanges();
+        window.getSelection().addRange(r);
+      }
+    });
+  });
+
+  {% if not user.profile_ready %}
+  setTimeout(function(){ window.location.reload(); }, 8000);
+  {% endif %}
+})();
+</script>
+{% endblock %}

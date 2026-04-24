@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}{% if error %}Authorization Error{% else %}Connected{% endif %} — Reclio{% endblock %}
+
+{% block content %}
+{% if error %}
+<header class="hero compact">
+  <div class="status-icon status-icon-error" aria-hidden="true">
+    <svg viewBox="0 0 28 28" width="28" height="28" fill="none">
+      <circle cx="14" cy="14" r="11" stroke="currentColor" stroke-width="2"/>
+      <path d="M9 9 L19 19 M19 9 L9 19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    </svg>
+  </div>
+  <h1 class="title-1">Couldn't connect</h1>
+  <p class="hero-subtitle">{{ error }}</p>
+</header>
+<section class="cta">
+  <a href="/auth/trakt" class="btn btn-primary">Try again</a>
+  <a href="/" class="btn btn-secondary">Back home</a>
+</section>
+{% else %}
+<header class="hero compact">
+  <div class="status-icon status-icon-success" aria-hidden="true">
+    <svg viewBox="0 0 28 28" width="28" height="28" fill="none">
+      <circle cx="14" cy="14" r="11" stroke="currentColor" stroke-width="2"/>
+      <path d="M8 14 L12 18 L20 10" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  </div>
+  <h1 class="title-1">Connected</h1>
+  <p class="hero-subtitle">Redirecting to your dashboard…</p>
+</header>
+{% endif %}
+{% endblock %}

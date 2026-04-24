@@ -1,0 +1,9 @@
+reclio.p0xl.com {
+    reverse_proxy app:8000
+    encode gzip zstd
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer-when-downgrade"
+    }
+}

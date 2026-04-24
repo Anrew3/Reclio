@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Connect Trakt — Reclio{% endblock %}
+
+{% block content %}
+<header class="hero compact">
+  <h1 class="title-1">Connect your Trakt</h1>
+  <p class="hero-subtitle">We'll use your watch history to tune your Chillio feeds.</p>
+</header>
+
+<div class="ios-card permissions">
+  <h3 class="headline">Reclio will:</h3>
+  <ul class="check-list">
+    <li><span class="check">✓</span> Read your watch history and ratings</li>
+    <li><span class="check">✓</span> Read your watchlist</li>
+    <li><span class="check">✓</span> Create 3 managed lists for recommendations</li>
+  </ul>
+  <p class="footnote">You can disconnect any time from your Trakt settings.</p>
+</div>
+
+<section class="cta">
+  <a href="/auth/trakt" class="btn btn-primary">Authorize with Trakt</a>
+</section>
+{% endblock %}
