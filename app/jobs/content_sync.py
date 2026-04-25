@@ -204,22 +204,23 @@ async def run_content_sync() -> dict[str, int]:
 
     # Batch push to Recombee
     recombee = get_recombee()
-    successful_ids: set[str] = set()
+    failed_ids: set[str] = set()
     if recombee.available and recombee_items:
         logger.info("content_sync: batch pushing %d items to Recombee", len(recombee_items))
         push_stats = await recombee.upsert_items_batch(recombee_items)
         stats["recombee_sent"] = push_stats["sent"]
         stats["recombee_succeeded"] = push_stats["succeeded"]
         stats["recombee_failed"] = push_stats["failed"]
-        # For simplicity, if the batch didn't error out, mark all as synced.
-        # Per-item failure tracking would require mapping Batch response indices.
-        if push_stats["failed"] == 0:
-            successful_ids = {k for k, _ in recombee_items}
+        failed_ids = push_stats.get("failed_ids", set())
 
     # Single batched commit of catalog rows
+    # Mark every row whose Recombee push didn't fail as synced. The
+    # previous "all-or-nothing" rule meant a single failed item left the
+    # entire batch perma-unsynced (because they're now in the catalog and
+    # never re-attempted).
     if catalog_rows:
         for row in catalog_rows:
-            if row.tmdb_id in successful_ids:
+            if row.tmdb_id not in failed_ids:
                 row.recombee_synced = True
         async with session_scope() as session:
             session.add_all(catalog_rows)

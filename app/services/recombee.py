@@ -161,7 +161,7 @@ class RecombeeService:
         self,
         items: list[tuple[str, dict[str, Any]]],
         chunk_size: int = 500,
-    ) -> dict[str, int]:
+    ) -> dict[str, Any]:
         """Bulk upsert items in batched Recombee requests.
 
         Args:
@@ -169,23 +169,33 @@ class RecombeeService:
             chunk_size: number of ops per batch (Recombee supports up to ~10k,
                         but 500 keeps response payloads sane and errors isolated)
 
-        Returns stats {sent, succeeded, failed}.
+        Returns stats {sent, succeeded, failed, failed_ids: set[str]}.
+        Callers can use `failed_ids` to track per-item failures and avoid
+        marking partially-failed catalog rows as synced.
         """
-        stats = {"sent": 0, "succeeded": 0, "failed": 0}
+        stats: dict[str, Any] = {
+            "sent": 0, "succeeded": 0, "failed": 0,
+            "failed_ids": set(),
+        }
         if not self._client or not items:
             return stats
         rq = self._rq
 
+        # Build requests AND a parallel list of item_ids so we can attribute
+        # per-request results back to the originating item.
         requests = []
+        request_ids: list[str] = []
         for item_id, props in items:
             clean = {k: v for k, v in props.items() if v is not None}
             # SetItemValues with cascade_create=True creates the item if missing
             # AND sets values in one call — no need for separate AddItem.
             if clean:
                 requests.append(rq.SetItemValues(item_id, clean, cascade_create=True))
+                request_ids.append(item_id)
 
         for start in range(0, len(requests), chunk_size):
             chunk = requests[start : start + chunk_size]
+            chunk_ids = request_ids[start : start + chunk_size]
             stats["sent"] += len(chunk)
             try:
                 result = await asyncio.to_thread(
@@ -193,12 +203,14 @@ class RecombeeService:
                 )
                 # Batch response is a list of per-request results with a "code"
                 if isinstance(result, list):
-                    for entry in result:
+                    for idx, entry in enumerate(result):
                         code = entry.get("code") if isinstance(entry, dict) else 200
                         if 200 <= int(code or 500) < 300:
                             stats["succeeded"] += 1
                         else:
                             stats["failed"] += 1
+                            if idx < len(chunk_ids):
+                                stats["failed_ids"].add(chunk_ids[idx])
                 else:
                     stats["succeeded"] += len(chunk)
             except Exception as exc:  # noqa: BLE001
@@ -206,6 +218,7 @@ class RecombeeService:
                     "Recombee batch (items) chunk of %d failed: %s", len(chunk), exc
                 )
                 stats["failed"] += len(chunk)
+                stats["failed_ids"].update(chunk_ids)
 
         return stats
 

@@ -7,6 +7,7 @@ refused — never allow unauthenticated admin access.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import secrets
 import uuid
@@ -163,4 +164,43 @@ async def admin_status(
             "embedding_stored": embedded_count or 0,
             "last_updated": last_content_update.isoformat() if last_content_update else None,
         },
+    }
+
+
+@router.get("/recombee/preview/{user_id}")
+async def recombee_preview(
+    user_id: str = Path(..., min_length=8, max_length=64),
+    count: int = 10,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Return Recombee's raw recommendations for a user, split by media type.
+
+    Useful for sanity-checking what the rec engine is producing without
+    waiting for the next user_sync sweep to materialize a Trakt list.
+
+    Item IDs are Reclio's internal format (`movie_<tmdb_id>` / `tv_<tmdb_id>`).
+    Empty lists usually mean the user hasn't been synced yet, or Recombee
+    hasn't seen enough interactions to recommend anything.
+    """
+    _require_admin(x_admin_token)
+    user_id = _validate_user_id(user_id)
+    count = max(1, min(50, count))
+
+    recombee = get_recombee()
+    if not recombee.available:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="recombee unavailable (check RECOMBEE_DATABASE_ID / RECOMBEE_PRIVATE_TOKEN)",
+        )
+
+    movies, shows = await asyncio.gather(
+        recombee.get_recommendations(user_id, count=count, filter_media_type="movie"),
+        recombee.get_recommendations(user_id, count=count, filter_media_type="tv"),
+    )
+    return {
+        "user_id": user_id,
+        "count": count,
+        "movies": movies,
+        "shows": shows,
+        "totals": {"movies": len(movies), "shows": len(shows)},
     }

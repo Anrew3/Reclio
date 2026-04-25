@@ -68,20 +68,17 @@ async def _push_interactions(
     await recombee.add_user(user_id)
     trakt = get_trakt()
 
-    try:
-        movie_history, show_history, movie_ratings, show_ratings, watchlist = await asyncio.gather(
-            trakt.get_watch_history(access_token, limit=500, media_type="movies"),
-            trakt.get_watch_history(access_token, limit=500, media_type="shows"),
-            trakt.get_ratings(access_token, "movies"),
-            trakt.get_ratings(access_token, "shows"),
-            trakt.get_watchlist(access_token),
-            return_exceptions=True,
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Trakt bulk fetch failed for %s: %s", user_id, exc)
-        return datetime.utcnow()
+    # gather with return_exceptions=True never raises — it inlines exceptions.
+    fetched = await asyncio.gather(
+        trakt.get_watch_history(access_token, limit=500, media_type="movies"),
+        trakt.get_watch_history(access_token, limit=500, media_type="shows"),
+        trakt.get_ratings(access_token, "movies"),
+        trakt.get_ratings(access_token, "shows"),
+        trakt.get_watchlist(access_token),
+        return_exceptions=True,
+    )
+    movie_history, show_history, movie_ratings, show_ratings, watchlist = fetched
 
-    # asyncio.gather with return_exceptions=True returns exc instances in-line
     def _safe(result: Any) -> list:
         return result if isinstance(result, list) else []
 
@@ -90,6 +87,17 @@ async def _push_interactions(
     movie_ratings = _safe(movie_ratings)
     show_ratings = _safe(show_ratings)
     watchlist = _safe(watchlist)
+
+    # If every Trakt fetch failed, don't advance the cutoff — Trakt history
+    # has no modified_at, so a failed window would silently lose any items
+    # added during the outage. Returning `since` keeps the next sync looking
+    # back to where we last succeeded.
+    all_failed = all(not isinstance(r, list) for r in fetched)
+    if all_failed:
+        logger.warning(
+            "user_sync: all Trakt fetches failed for %s; keeping cutoff", user_id,
+        )
+        return since or datetime.utcnow()
 
     cutoff_ts = since.timestamp() if since else 0
     interactions: list[dict[str, Any]] = []
