@@ -59,6 +59,31 @@
   {% endif %}
 </section>
 
+{% if recently_watched %}
+<section class="ios-card recent-card">
+  <h3 class="title-3">Recently Watched</h3>
+  <p class="subheadline label-secondary">From your Trakt history</p>
+  <div class="recent-row" role="list">
+    {% for item in recently_watched %}
+    <div class="recent-item" role="listitem">
+      <div class="recent-poster">
+        {% if item.poster_url %}
+          <img src="{{ item.poster_url }}" alt="{{ item.title }} poster" loading="lazy" />
+        {% else %}
+          <div class="recent-poster-fallback" aria-hidden="true">
+            {{ item.title[0]|upper if item.title else '?' }}
+          </div>
+        {% endif %}
+        <span class="recent-kind {{ item.kind }}">{{ 'TV' if item.kind == 'tv' else 'Film' }}</span>
+      </div>
+      <p class="recent-title" title="{{ item.title }}">{{ item.title }}</p>
+      {% if item.year %}<p class="recent-year">{{ item.year }}</p>{% endif %}
+    </div>
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
 {% if taste %}
 <section class="ios-card taste-card">
   <h3 class="title-3">Your Taste</h3>
@@ -91,7 +116,14 @@
     <div class="actor-list">
       {% for actor in top_actors %}
       <div class="actor-chip">
-        <div class="actor-avatar">{{ actor.name[0] }}</div>
+        {% if actor.profile_url %}
+          <img class="actor-avatar actor-avatar-img"
+               src="{{ actor.profile_url }}"
+               alt="{{ actor.name }}"
+               loading="lazy" />
+        {% else %}
+          <div class="actor-avatar">{{ actor.name[0] }}</div>
+        {% endif %}
         <span class="actor-name">{{ actor.name }}</span>
       </div>
       {% endfor %}
@@ -120,6 +152,10 @@
 {% endif %}
 
 <section class="footer-actions">
+  <a href="/ask" class="btn-link">Ask Reclio</a>
+  <span class="footer-sep" aria-hidden="true">·</span>
+  <a href="/preferences" class="btn-link">Edit preferences</a>
+  <span class="footer-sep" aria-hidden="true">·</span>
   <a href="/auth/trakt" class="btn-link">Reconnect Trakt</a>
 </section>
 {% endblock %}

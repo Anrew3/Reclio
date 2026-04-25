@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}{% if is_first_run %}Tell us your taste{% else %}Preferences{% endif %} — Reclio{% endblock %}
+
+{% block content %}
+<header class="dashboard-header">
+  <div>
+    <p class="caption label-tertiary">{% if is_first_run %}One-time setup{% else %}Editing preferences for{% endif %}</p>
+    <h1 class="title-2">{{ user.display_name or user.trakt_username or "Trakt user" }}</h1>
+  </div>
+  {% if not is_first_run %}
+  <a href="/dashboard" class="btn-link">Back</a>
+  {% endif %}
+</header>
+
+{% if is_first_run %}
+<section class="ios-card">
+  <h3 class="title-3">Tell Reclio what you actually like</h3>
+  <p class="callout">Your Trakt history is the foundation. These few choices fine-tune your rows so Reclio doesn't keep recommending the kinds of films you skip.</p>
+</section>
+{% endif %}
+
+<form action="/onboarding" method="post" class="prefs-form">
+
+  <section class="ios-card">
+    <div class="taste-section">
+      <p class="subheadline label-secondary">Discovery vs comfort</p>
+      <p class="footnote">How adventurous should recommendations be?</p>
+      <div class="slider-row">
+        <span class="slider-end">Comfort</span>
+        <input type="range" name="discovery_level" min="0" max="100" value="{{ prefs.discovery_level }}"
+               class="ios-slider" oninput="document.getElementById('disc-out').textContent = this.value">
+        <span class="slider-end">Discovery</span>
+      </div>
+      <p class="caption">Current: <span id="disc-out">{{ prefs.discovery_level }}</span></p>
+    </div>
+
+    <div class="taste-section">
+      <p class="subheadline label-secondary">Era</p>
+      <p class="footnote">Lean toward classics or new releases?</p>
+      <div class="slider-row">
+        <span class="slider-end">Classics</span>
+        <input type="range" name="era_preference" min="0" max="100" value="{{ prefs.era_preference }}"
+               class="ios-slider" oninput="document.getElementById('era-out').textContent = this.value">
+        <span class="slider-end">New only</span>
+      </div>
+      <p class="caption">Current: <span id="era-out">{{ prefs.era_preference }}</span></p>
+    </div>
+  </section>
+
+  <section class="ios-card">
+    <div class="taste-section">
+      <p class="subheadline label-secondary">Pick the moods you crave</p>
+      <p class="footnote">Tap any that apply. Skip if you don't care.</p>
+      <div class="pill-row pill-row--select">
+        {% for mood in moods %}
+          {% set checked = prefs.favorite_moods and mood.key in prefs.favorite_moods %}
+          <label class="genre-pill genre-pill--toggle{% if checked %} top{% endif %}">
+            <input type="checkbox" name="favorite_moods" value="{{ mood.key }}"{% if checked %} checked{% endif %}>
+            {{ mood.label }}
+          </label>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="ios-card">
+    <div class="taste-section">
+      <p class="subheadline label-secondary">Movie genres to hide</p>
+      <p class="footnote">Reclio will never recommend these.</p>
+      <div class="pill-row pill-row--select">
+        {% for gid, name in movie_genres %}
+          {% set checked = prefs.excluded_movie_genres and gid in prefs.excluded_movie_genres %}
+          <label class="genre-pill genre-pill--toggle{% if checked %} excluded{% endif %}">
+            <input type="checkbox" name="excluded_movie_genres" value="{{ gid }}"{% if checked %} checked{% endif %}>
+            {{ name }}
+          </label>
+        {% endfor %}
+      </div>
+    </div>
+
+    <div class="taste-section">
+      <p class="subheadline label-secondary">Show genres to hide</p>
+      <div class="pill-row pill-row--select">
+        {% for gid, name in show_genres %}
+          {% set checked = prefs.excluded_show_genres and gid in prefs.excluded_show_genres %}
+          <label class="genre-pill genre-pill--toggle{% if checked %} excluded{% endif %}">
+            <input type="checkbox" name="excluded_show_genres" value="{{ gid }}"{% if checked %} checked{% endif %}>
+            {{ name }}
+          </label>
+        {% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <section class="ios-card">
+    <label class="toggle-row">
+      <div>
+        <p class="headline">Family-safe mode</p>
+        <p class="footnote">Hide adult & mature-rated titles.</p>
+      </div>
+      <input type="checkbox" name="family_safe" {% if prefs.family_safe %}checked{% endif %} class="ios-toggle">
+    </label>
+  </section>
+
+  <div class="cta">
+    <button type="submit" class="btn btn-primary">
+      {% if is_first_run %}Save & build my rows{% else %}Save changes{% endif %}
+    </button>
+    {% if is_first_run %}
+    <a href="/dashboard" class="btn-link">Skip for now</a>
+    {% endif %}
+  </div>
+</form>
+{% endblock %}

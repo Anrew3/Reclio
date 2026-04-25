@@ -1,6 +1,6 @@
 # Reclio docs
 
-Docusaurus-powered documentation for Reclio.
+Documentation for Reclio.
 
 ## Run locally
 

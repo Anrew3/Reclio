@@ -20,7 +20,7 @@ const sidebars = {
       type: 'category',
       label: 'Reference',
       collapsed: false,
-      items: ['api-reference', 'adaptive-sync', 'caddy-vs-traefik'],
+      items: ['api-reference', 'adaptive-sync', 'caddy-vs-traefik', 'troubleshooting'],
     },
   ],
 };

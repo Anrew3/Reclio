@@ -1,16 +1,38 @@
-"""Trakt.tv API client — OAuth, history, ratings, watchlist, managed lists."""
+"""Trakt.tv API client — OAuth, history, ratings, watchlist, managed lists.
+
+Read endpoints are cached with short TTLs to absorb duplicate fetches. The
+common pattern in `sync_one_user` is `build_taste_profile()` and
+`_push_interactions()` both pulling history + ratings back-to-back — without
+the cache, that's 8 redundant Trakt calls per sync. The cache key is keyed
+on a hash of the access token so different users never share entries.
+
+Cache TTLs (per endpoint):
+  history          5 min  (most dynamic)
+  ratings          15 min
+  watchlist        15 min
+  watch_progress   2 min  (used by Continue Watching row)
+  user_profile     1 hour (almost never changes)
+  user_lists       30 min
+"""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from typing import Any
 
 import httpx
 
 from app.config import get_settings
+from app.utils.cache import TTLCache
 
 logger = logging.getLogger(__name__)
+
+
+def _token_key(token: str) -> str:
+    """Short hash for use in cache keys — never store raw tokens in keys."""
+    return hashlib.sha256(token.encode()).hexdigest()[:16]
 
 
 class TraktError(Exception):
@@ -35,6 +57,8 @@ class TraktClient:
         self.redirect_uri = redirect_uri or settings.trakt_redirect_uri
         self._client: httpx.AsyncClient | None = None
         self._semaphore = asyncio.Semaphore(5)
+        # Per-client cache. Bounded at 4096 entries (default) and LRU-evicted.
+        self._cache = TTLCache(default_ttl=300.0)
 
     async def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -135,9 +159,18 @@ class TraktClient:
         return await self._request("POST", "/oauth/token", json=payload)
 
     # --- User data ----------------------------------------------
+    #
+    # All read methods route through the per-client TTL cache. The token
+    # contributes to the cache key as a short hash so different users
+    # never collide.  Mutating endpoints stay uncached.
 
     async def get_user_profile(self, token: str) -> dict:
-        return await self._request("GET", "/users/me", access_token=token)
+        key = f"profile:{_token_key(token)}"
+
+        async def _fetch() -> dict:
+            return await self._request("GET", "/users/me", access_token=token)
+
+        return await self._cache.get_or_set(key, _fetch, ttl=3600)
 
     async def get_watch_history(
         self, token: str, limit: int = 100, page: int = 1, media_type: str | None = None
@@ -145,29 +178,62 @@ class TraktClient:
         path = "/sync/history"
         if media_type in {"movies", "shows", "episodes"}:
             path = f"/sync/history/{media_type}"
-        params = {"limit": limit, "page": page, "extended": "min"}
-        data = await self._request("GET", path, access_token=token, params=params)
-        return data or []
+        key = f"history:{_token_key(token)}:{media_type or 'all'}:{limit}:{page}"
+
+        async def _fetch() -> list[dict]:
+            params = {"limit": limit, "page": page, "extended": "min"}
+            data = await self._request("GET", path, access_token=token, params=params)
+            return data or []
+
+        return await self._cache.get_or_set(key, _fetch, ttl=300)
 
     async def get_ratings(self, token: str, media_type: str | None = None) -> list[dict]:
         path = "/sync/ratings"
         if media_type in {"movies", "shows", "episodes"}:
             path = f"/sync/ratings/{media_type}"
-        data = await self._request("GET", path, access_token=token)
-        return data or []
+        key = f"ratings:{_token_key(token)}:{media_type or 'all'}"
+
+        async def _fetch() -> list[dict]:
+            data = await self._request("GET", path, access_token=token)
+            return data or []
+
+        return await self._cache.get_or_set(key, _fetch, ttl=900)
 
     async def get_watchlist(self, token: str) -> list[dict]:
-        data = await self._request("GET", "/sync/watchlist", access_token=token)
-        return data or []
+        key = f"watchlist:{_token_key(token)}"
+
+        async def _fetch() -> list[dict]:
+            data = await self._request("GET", "/sync/watchlist", access_token=token)
+            return data or []
+
+        return await self._cache.get_or_set(key, _fetch, ttl=900)
 
     async def get_watch_progress(self, token: str) -> list[dict]:
         # Trakt's sync/playback endpoint returns in-progress items.
-        data = await self._request("GET", "/sync/playback", access_token=token)
-        return data or []
+        key = f"progress:{_token_key(token)}"
+
+        async def _fetch() -> list[dict]:
+            data = await self._request("GET", "/sync/playback", access_token=token)
+            return data or []
+
+        return await self._cache.get_or_set(key, _fetch, ttl=120)
 
     async def get_user_lists(self, token: str) -> list[dict]:
-        data = await self._request("GET", "/users/me/lists", access_token=token)
-        return data or []
+        key = f"lists:{_token_key(token)}"
+
+        async def _fetch() -> list[dict]:
+            data = await self._request("GET", "/users/me/lists", access_token=token)
+            return data or []
+
+        return await self._cache.get_or_set(key, _fetch, ttl=1800)
+
+    def invalidate_user_cache(self, token: str) -> None:
+        """Drop every cache entry for this token. Call after we mutate the
+        user's Trakt state (clear/add to managed lists, create lists)."""
+        prefix = _token_key(token)
+        for entry_key in list(self._cache._data.keys()):  # noqa: SLF001
+            if prefix in entry_key:
+                self._cache.invalidate(entry_key)
 
     # --- Managed lists -------------------------------------------
 

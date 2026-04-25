@@ -9,10 +9,12 @@ response.
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.preferences import UserPreferences
 from app.models.taste_cache import TasteCache
 from app.models.user import User
 from app.services.tmdb import MOVIE_GENRES, TV_GENRES
@@ -20,16 +22,21 @@ from app.services.tmdb import MOVIE_GENRES, TV_GENRES
 logger = logging.getLogger(__name__)
 
 
-def _top_genre_ids(scores: dict | None, k: int = 3) -> list[int]:
+def _top_genre_ids(scores: dict | None, k: int = 3, exclude: set[int] | None = None) -> list[int]:
     if not scores:
         return []
     ordered = sorted(scores.items(), key=lambda x: x[1], reverse=True)
     out: list[int] = []
-    for gid, _score in ordered[:k]:
+    for gid, _score in ordered:
         try:
-            out.append(int(gid))
+            gid_int = int(gid)
         except (TypeError, ValueError):
             continue
+        if exclude and gid_int in exclude:
+            continue
+        out.append(gid_int)
+        if len(out) >= k:
+            break
     return out
 
 
@@ -43,11 +50,70 @@ def _join_genre_ids(ids: list[int]) -> str:
     return ",".join(str(i) for i in ids) if ids else ""
 
 
+def _prefs_extra_params(
+    prefs: UserPreferences | None, media_type: str
+) -> str:
+    """Build the extra TMDB /discover params dictated by user preferences.
+
+    Returns a string like '&without_genres=27,53&include_adult=false' that
+    can be appended to an existing parameters string. Empty string when no
+    preferences apply.
+    """
+    if prefs is None:
+        return ""
+    parts: list[str] = []
+
+    # Excluded genres → without_genres
+    excluded = prefs.excluded_movie_genres if media_type == "movies" else prefs.excluded_show_genres
+    if excluded:
+        parts.append(f"without_genres={','.join(str(g) for g in excluded)}")
+
+    # Family-safe → drop adult, cap movie certifications. TV doesn't have a
+    # single global cert system on TMDB, so we only apply the cert floor to
+    # movies; the include_adult=false flag works for both.
+    if prefs.family_safe:
+        parts.append("include_adult=false")
+        if media_type == "movies":
+            parts.append("certification_country=US&certification.lte=PG-13")
+
+    # Era preference: only skew on the strong ends to avoid overfitting.
+    # 0..30   → "I love classics" — cap release year at 2005
+    # 70..100 → "only new" — floor at 5 years ago
+    if prefs.era_preference <= 30:
+        if media_type == "movies":
+            parts.append("primary_release_date.lte=2005-12-31")
+        else:
+            parts.append("first_air_date.lte=2005-12-31")
+    elif prefs.era_preference >= 70:
+        cutoff = (datetime.utcnow().year - 5)
+        if media_type == "movies":
+            parts.append(f"primary_release_date.gte={cutoff}-01-01")
+        else:
+            parts.append(f"first_air_date.gte={cutoff}-01-01")
+
+    return ("&" + "&".join(parts)) if parts else ""
+
+
+def _hidden_gem_thresholds(prefs: UserPreferences | None) -> tuple[int, int]:
+    """Return (vote_count_min, popularity_max) for hidden-gem rows, scaled
+    by discovery_level. Higher discovery → fewer minimum votes (deeper
+    into the long tail) and stricter popularity cap (truer hidden gems).
+    """
+    if prefs is None:
+        return 500, 30  # historical defaults
+    level = max(0, min(100, prefs.discovery_level))
+    # Linear interp: discovery 0 → (1000, 50)  ;  discovery 100 → (200, 15)
+    vote_min = int(1000 + (200 - 1000) * (level / 100))
+    pop_max = int(50 + (15 - 50) * (level / 100))
+    return vote_min, pop_max
+
+
 async def build_feeds(
     session: AsyncSession,
     user: User | None,
     taste: TasteCache | None,
     byw_titles: dict[str, str] | None = None,
+    prefs: UserPreferences | None = None,
 ) -> list[dict[str, Any]]:
     """Build the 22-feed personalized response.
 
@@ -57,6 +123,8 @@ async def build_feeds(
         taste: cached taste profile or None
         byw_titles: optional pre-generated "Because You Watched" titles
                     keyed by "movie" and "show" (from ollama.py)
+        prefs: user preferences captured via the onboarding questionnaire
+               or None (defaults baked into the builder still apply).
     """
     byw_titles = byw_titles or {}
 
@@ -66,8 +134,22 @@ async def build_feeds(
     last_show_id = taste.last_watched_show_tmdb_id if taste else None
     last_show_title = taste.last_watched_show_title if taste else None
 
-    movie_genre_ids = _top_genre_ids(taste.movie_genre_scores if taste else None, 3)
-    show_genre_ids = _top_genre_ids(taste.show_genre_scores if taste else None, 3)
+    # Excluded genres also drop out of the "top genres" we use for row
+    # titles — otherwise a user who excludes Horror could still see a
+    # "Horror Movies You'll Love" row.
+    excluded_movie = set(prefs.excluded_movie_genres or []) if prefs else set()
+    excluded_show = set(prefs.excluded_show_genres or []) if prefs else set()
+
+    movie_genre_ids = _top_genre_ids(
+        taste.movie_genre_scores if taste else None, 3, exclude=excluded_movie
+    )
+    show_genre_ids = _top_genre_ids(
+        taste.show_genre_scores if taste else None, 3, exclude=excluded_show
+    )
+
+    movie_pref_extra = _prefs_extra_params(prefs, "movies")
+    show_pref_extra = _prefs_extra_params(prefs, "shows")
+    gem_vote_min, gem_pop_max = _hidden_gem_thresholds(prefs)
 
     top_movie_genres_str = _join_genre_ids(movie_genre_ids)
     top_show_genres_str = _join_genre_ids(show_genre_ids)
@@ -125,7 +207,7 @@ async def build_feeds(
             f"with_genres={top_movie_genres_str}&sort_by=popularity.desc"
             if top_movie_genres_str
             else "sort_by=popularity.desc"
-        )
+        ) + movie_pref_extra
         feeds.append({
             "id": "recommended_movies",
             "title": "Recommended For You",
@@ -148,7 +230,7 @@ async def build_feeds(
             f"with_genres={top_show_genres_str}&sort_by=popularity.desc"
             if top_show_genres_str
             else "sort_by=popularity.desc"
-        )
+        ) + show_pref_extra
         feeds.append({
             "id": "recommended_shows",
             "title": "Recommended For You",
@@ -209,7 +291,7 @@ async def build_feeds(
         f"with_genres={top_movie_genres_str}&sort_by=vote_average.desc&vote_count.gte=200"
         if top_movie_genres_str
         else "sort_by=vote_average.desc&vote_count.gte=200"
-    )
+    ) + movie_pref_extra
     feeds.append({
         "id": "similar_movies",
         "title": "Similar To Movies You've Watched",
@@ -223,7 +305,7 @@ async def build_feeds(
         f"with_genres={top_show_genres_str}&sort_by=vote_average.desc&vote_count.gte=100"
         if top_show_genres_str
         else "sort_by=vote_average.desc&vote_count.gte=100"
-    )
+    ) + show_pref_extra
     feeds.append({
         "id": "similar_shows",
         "title": "Similar To Shows You've Watched",
@@ -284,6 +366,7 @@ async def build_feeds(
             "parameters": (
                 f"with_genres={top_movie_genre_id}"
                 f"&sort_by=vote_average.desc&vote_count.gte=300"
+                f"{movie_pref_extra}"
             ),
         },
         "content_type": "movies",
@@ -299,6 +382,7 @@ async def build_feeds(
             "parameters": (
                 f"with_genres={top_show_genre_id}"
                 f"&sort_by=vote_average.desc&vote_count.gte=100"
+                f"{show_pref_extra}"
             ),
         },
         "content_type": "shows",
@@ -311,7 +395,7 @@ async def build_feeds(
         "source": "tmdb_query",
         "source_metadata": {
             "path": "/discover/movie",
-            "parameters": f"with_genres={second_movie_genre_id}&sort_by=popularity.desc",
+            "parameters": f"with_genres={second_movie_genre_id}&sort_by=popularity.desc{movie_pref_extra}",
         },
         "content_type": "movies",
     })
@@ -323,7 +407,7 @@ async def build_feeds(
         "source": "tmdb_query",
         "source_metadata": {
             "path": "/discover/tv",
-            "parameters": f"with_genres={second_show_genre_id}&sort_by=popularity.desc",
+            "parameters": f"with_genres={second_show_genre_id}&sort_by=popularity.desc{show_pref_extra}",
         },
         "content_type": "shows",
     })
@@ -346,7 +430,7 @@ async def build_feeds(
         "content_type": "shows",
     })
 
-    # 18 - Hidden Gem Movies
+    # 18 - Hidden Gem Movies — thresholds scale with discovery_level pref
     feeds.append({
         "id": "hidden_gems_movies",
         "title": "Hidden Gem Movies",
@@ -354,14 +438,18 @@ async def build_feeds(
         "source_metadata": {
             "path": "/discover/movie",
             "parameters": (
-                "vote_average.gte=7.5&vote_count.gte=500"
-                "&popularity.lte=30&sort_by=vote_average.desc"
+                f"vote_average.gte=7.5&vote_count.gte={gem_vote_min}"
+                f"&popularity.lte={gem_pop_max}&sort_by=vote_average.desc"
+                f"{movie_pref_extra}"
             ),
         },
         "content_type": "movies",
     })
 
-    # 19 - Hidden Gem Shows
+    # 19 - Hidden Gem Shows — thresholds scale with discovery_level pref
+    # (use ~0.5x of movie thresholds because TV catalog is smaller)
+    show_gem_votes = max(50, gem_vote_min // 2)
+    show_gem_pop = max(10, int(gem_pop_max * 0.7))
     feeds.append({
         "id": "hidden_gems_shows",
         "title": "Hidden Gem Shows",
@@ -369,8 +457,9 @@ async def build_feeds(
         "source_metadata": {
             "path": "/discover/tv",
             "parameters": (
-                "vote_average.gte=7.5&vote_count.gte=200"
-                "&popularity.lte=20&sort_by=vote_average.desc"
+                f"vote_average.gte=7.5&vote_count.gte={show_gem_votes}"
+                f"&popularity.lte={show_gem_pop}&sort_by=vote_average.desc"
+                f"{show_pref_extra}"
             ),
         },
         "content_type": "shows",

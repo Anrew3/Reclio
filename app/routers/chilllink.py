@@ -29,6 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_session
+from app.models.preferences import UserPreferences
 from app.models.taste_cache import TasteCache
 from app.models.user import User
 from app.schemas.chilllink import Manifest, SupportedEndpoints
@@ -102,6 +103,7 @@ async def feeds(
 
     user: User | None = None
     taste: TasteCache | None = None
+    prefs: UserPreferences | None = None
     byw_titles: dict[str, str] = {}
 
     try:
@@ -116,6 +118,7 @@ async def feeds(
 
         if user is not None:
             taste = await session.get(TasteCache, user.id)
+            prefs = await session.get(UserPreferences, user.id)
             user.last_seen = datetime.utcnow()
             try:
                 from app.services.activity import record_feed_hit
@@ -164,7 +167,7 @@ async def feeds(
         logger.exception("Failed loading user context for feeds: %s", exc)
 
     try:
-        feed_list = await build_feeds(session, user, taste, byw_titles)
+        feed_list = await build_feeds(session, user, taste, byw_titles, prefs=prefs)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Feed builder failed, returning minimal fallback: %s", exc)
         feed_list = _minimal_fallback_feeds()

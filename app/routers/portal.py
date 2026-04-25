@@ -17,11 +17,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import get_session
 from app.models.account import Account
+from app.models.preferences import UserPreferences
 from app.models.taste_cache import TasteCache
 from app.models.user import User
-from app.services.tmdb import MOVIE_GENRES, TV_GENRES
+from app.services.tmdb import MOVIE_GENRES, TV_GENRES, get_tmdb
 from app.services.trakt import get_trakt
-from app.utils.crypto import encrypt
+from app.utils.crypto import decrypt, encrypt
 from app.utils.session import (
     ACTIVE_MEMBER_COOKIE,
     ACTIVE_MEMBER_MAX_AGE,
@@ -303,6 +304,134 @@ async def auth_callback(
     return response
 
 
+_TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w342"
+_TMDB_HEADSHOT_BASE = "https://image.tmdb.org/t/p/w185"
+
+
+async def _hydrate_actor_headshots(actors: list[dict]) -> list[dict]:
+    """Attach a TMDB profile URL to each {id, name} entry.
+
+    TMDB calls are cached 6h via TTLCache — repeat dashboard loads cost
+    nothing. Failures degrade silently: missing `profile_url` falls
+    through to the single-letter avatar in the template.
+    """
+    if not actors:
+        return []
+    tmdb = get_tmdb()
+
+    async def _enrich(actor: dict) -> dict:
+        out = dict(actor)
+        person_id = actor.get("id")
+        if not person_id:
+            return out
+        try:
+            data = await tmdb.get_person(int(person_id))
+        except Exception:  # noqa: BLE001
+            data = {}
+        profile_path = (data or {}).get("profile_path")
+        if profile_path:
+            out["profile_url"] = f"{_TMDB_HEADSHOT_BASE}{profile_path}"
+        return out
+
+    return list(await asyncio.gather(*[_enrich(a) for a in actors]))
+
+
+async def _recently_watched(user: User, limit: int = 12) -> list[dict]:
+    """Build the 'Recently Watched' rail for the dashboard.
+
+    Pulls the most-recent movie + episode entries from Trakt (both fetches
+    are cached for 5 min), dedupes by tmdb_id, sorts by watched_at desc,
+    and enriches each with a TMDB poster path.
+
+    Failures degrade gracefully — never raises, returns [] instead. The
+    dashboard hides the section when this is empty, so an outage on any
+    upstream just makes the row disappear rather than breaking the page.
+    """
+    if not user.trakt_access_token_enc:
+        return []
+    token = decrypt(user.trakt_access_token_enc)
+    if not token:
+        return []
+
+    trakt = get_trakt()
+    tmdb = get_tmdb()
+
+    fetched = await asyncio.gather(
+        trakt.get_watch_history(token, limit=25, media_type="movies"),
+        trakt.get_watch_history(token, limit=25, media_type="shows"),
+        return_exceptions=True,
+    )
+    movies, shows = fetched
+    movies = movies if isinstance(movies, list) else []
+    shows = shows if isinstance(shows, list) else []
+
+    # Normalize into a flat list of {kind, tmdb_id, title, year, watched_at}.
+    # Episode entries from /sync/history/shows include a parent `show` dict
+    # whose tmdb id we use (we want the show poster, not per-episode stills).
+    candidates: list[dict] = []
+    seen_ids: set[tuple[str, int]] = set()
+
+    for entry in movies:
+        movie = entry.get("movie") or {}
+        ids = movie.get("ids") or {}
+        tmdb_id = ids.get("tmdb")
+        if not tmdb_id:
+            continue
+        key = ("movie", int(tmdb_id))
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        candidates.append({
+            "kind": "movie",
+            "tmdb_id": int(tmdb_id),
+            "title": movie.get("title") or "",
+            "year": movie.get("year"),
+            "watched_at": entry.get("watched_at") or "",
+        })
+
+    for entry in shows:
+        show = entry.get("show") or {}
+        ids = show.get("ids") or {}
+        tmdb_id = ids.get("tmdb")
+        if not tmdb_id:
+            continue
+        key = ("tv", int(tmdb_id))
+        if key in seen_ids:
+            continue
+        seen_ids.add(key)
+        candidates.append({
+            "kind": "tv",
+            "tmdb_id": int(tmdb_id),
+            "title": show.get("title") or "",
+            "year": show.get("year"),
+            "watched_at": entry.get("watched_at") or "",
+        })
+
+    # Most recent first, then truncate.
+    candidates.sort(key=lambda c: c["watched_at"], reverse=True)
+    candidates = candidates[:limit]
+    if not candidates:
+        return []
+
+    # Hydrate posters. TMDB results are cached 6h so a returning dashboard
+    # load is cheap.
+    async def _poster(c: dict) -> dict:
+        try:
+            data = (
+                await tmdb.get_movie(c["tmdb_id"])
+                if c["kind"] == "movie"
+                else await tmdb.get_show(c["tmdb_id"])
+            )
+        except Exception:  # noqa: BLE001
+            data = {}
+        poster_path = (data or {}).get("poster_path")
+        c["poster_url"] = f"{_TMDB_POSTER_BASE}{poster_path}" if poster_path else None
+        return c
+
+    enriched = await asyncio.gather(*[_poster(c) for c in candidates])
+    return list(enriched)
+
+
 def _genre_pills(scores: dict | None, media_type: str, limit: int = 5) -> list[dict]:
     if not scores:
         return []
@@ -347,6 +476,13 @@ async def dashboard(
     account.last_seen = datetime.utcnow()
     await session.commit()
 
+    # First-run hook: bounce new Trakt users to the onboarding form once.
+    # Only after `profile_ready` so the page lands on a meaningful state
+    # (and the questionnaire has Trakt-derived defaults to play against).
+    prefs = await session.get(UserPreferences, user.id)
+    if user.profile_ready and (prefs is None or not prefs.onboarding_completed):
+        return RedirectResponse(url="/onboarding", status_code=302)
+
     taste = await session.get(TasteCache, user.id)
 
     addon_url = f"{settings.base_url.rstrip('/')}/?user_id={user.id}"
@@ -357,6 +493,22 @@ async def dashboard(
     )
     members = members_result.scalars().all()
 
+    # Recently-watched rail. Best-effort: any failure returns [] and the
+    # template hides the section.
+    try:
+        recently_watched = await _recently_watched(user)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("dashboard: recently_watched failed for %s: %s", user.id, exc)
+        recently_watched = []
+
+    # Hydrate actor headshots (TMDB cached 6h; safe to call on every load).
+    raw_actors = (taste.top_actors if taste else None) or []
+    try:
+        top_actors = await _hydrate_actor_headshots(raw_actors)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("dashboard: actor headshots failed for %s: %s", user.id, exc)
+        top_actors = raw_actors
+
     ctx = {
         "request": request,
         "settings": settings,
@@ -365,9 +517,10 @@ async def dashboard(
         "members": members,
         "taste": taste,
         "addon_url": addon_url,
+        "recently_watched": recently_watched,
         "movie_genres": _genre_pills(taste.movie_genre_scores if taste else None, "movies") if taste else [],
         "show_genres": _genre_pills(taste.show_genre_scores if taste else None, "shows") if taste else [],
-        "top_actors": (taste.top_actors if taste else None) or [],
+        "top_actors": top_actors,
         "preferred_decade": (taste.preferred_decade if taste else None),
         "total_movies": (taste.total_movies_watched if taste else 0),
         "total_shows": (taste.total_shows_watched if taste else 0),

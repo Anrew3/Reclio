@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% block title %}Ask Reclio{% endblock %}
+
+{% block content %}
+<header class="dashboard-header">
+  <div>
+    <p class="caption label-tertiary">Ask Reclio</p>
+    <h1 class="title-2">Hey {{ user.display_name or user.trakt_username or "there" }}</h1>
+  </div>
+  <a href="/dashboard" class="btn-link">Back</a>
+</header>
+
+<section class="ios-card">
+  <p class="callout">
+    Ask why something was recommended, what to watch tonight, or for picks
+    in a particular mood. Reclio answers from your taste profile and recent watches.
+  </p>
+  {% if not llm_enabled %}
+  <p class="footnote" style="margin-top:10px;color:var(--accent-orange);">
+    Chat is offline — no LLM provider configured. Self-hosters: set <code>LLM_PROVIDER</code>.
+  </p>
+  {% else %}
+  <p class="footnote" style="margin-top:10px;">
+    Provider: <code>{{ llm_provider }}</code>
+  </p>
+  {% endif %}
+</section>
+
+<section class="ios-card chat-card">
+  <div id="chat-thread" class="chat-thread" aria-live="polite"></div>
+
+  <form id="ask-form" class="chat-input-row" {% if not llm_enabled %}aria-disabled="true"{% endif %}>
+    <input
+      type="text"
+      id="chat-question"
+      name="question"
+      placeholder="Pick something cozy for tonight…"
+      maxlength="500"
+      autocomplete="off"
+      {% if not llm_enabled %}disabled{% endif %}
+      required
+    />
+    <button type="submit" class="btn btn-secondary" id="chat-send"
+      {% if not llm_enabled %}disabled{% endif %}>Ask</button>
+  </form>
+  <p class="footnote" id="chat-status" aria-live="polite"></p>
+</section>
+
+<section class="ios-card">
+  <p class="subheadline label-secondary">Try asking</p>
+  <ul class="ask-suggestions">
+    <li><button type="button" class="suggestion" data-q="What should I watch tonight if I want something light?">What should I watch tonight if I want something light?</button></li>
+    <li><button type="button" class="suggestion" data-q="Why are you recommending so many thrillers?">Why are you recommending so many thrillers?</button></li>
+    <li><button type="button" class="suggestion" data-q="Suggest a movie like the last one I watched.">Suggest a movie like the last one I watched.</button></li>
+    <li><button type="button" class="suggestion" data-q="What's a good 90s film I might've missed?">What's a good 90s film I might've missed?</button></li>
+  </ul>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  const form = document.getElementById('ask-form');
+  const input = document.getElementById('chat-question');
+  const send = document.getElementById('chat-send');
+  const thread = document.getElementById('chat-thread');
+  const status = document.getElementById('chat-status');
+
+  function appendBubble(kind, text) {
+    const wrap = document.createElement('div');
+    wrap.className = 'chat-bubble chat-bubble-' + kind;
+    wrap.textContent = text;
+    thread.appendChild(wrap);
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  document.querySelectorAll('.suggestion').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      input.value = btn.getAttribute('data-q') || '';
+      input.focus();
+    });
+  });
+
+  if (form) {
+    form.addEventListener('submit', async function(ev){
+      ev.preventDefault();
+      const q = (input.value || '').trim();
+      if (!q) return;
+      appendBubble('user', q);
+      input.value = '';
+      send.disabled = true;
+      status.textContent = 'Thinking…';
+
+      try {
+        const resp = await fetch('/ask/reply', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({question: q}),
+        });
+        const data = await resp.json();
+        if (data.answer) {
+          appendBubble('reclio', data.answer);
+          status.textContent = '';
+        } else {
+          appendBubble('error', data.error || 'No answer.');
+          status.textContent = '';
+        }
+      } catch (e) {
+        appendBubble('error', 'Network error. Try again.');
+        status.textContent = '';
+      } finally {
+        send.disabled = false;
+        input.focus();
+      }
+    });
+  }
+})();
+</script>
+{% endblock %}

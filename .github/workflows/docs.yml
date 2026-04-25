@@ -1,6 +1,6 @@
 name: Docs
 
-# Builds the Docusaurus site and publishes it to GitHub Pages whenever
+# Builds the docs site and publishes it to GitHub Pages whenever
 # something under docs/ lands on main. Also runs in PRs (build only,
 # no deploy) so doc changes get validated.
 

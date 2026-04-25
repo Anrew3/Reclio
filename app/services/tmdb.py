@@ -206,6 +206,10 @@ class TMDBClient:
     async def find_by_imdb_id(self, imdb_id: str) -> dict:
         return await self._get(f"/find/{imdb_id}", params={"external_source": "imdb_id"})
 
+    async def get_person(self, tmdb_person_id: int) -> dict:
+        """Person details (used for actor headshots on the dashboard)."""
+        return await self._get(f"/person/{tmdb_person_id}")
+
 
 def _parse_params(parameters: str) -> dict[str, str]:
     """Convert a '&' joined query string into a dict."""
