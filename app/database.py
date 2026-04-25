@@ -59,6 +59,39 @@ async def _migrate_add_user_account_columns(conn) -> None:
             text("ALTER TABLE users ADD COLUMN last_feed_request_at DATETIME")
         )
         logger.info("migration: added users.last_feed_request_at column")
+    if "trakt_byw_movies_list_id" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN trakt_byw_movies_list_id INTEGER")
+        )
+        logger.info("migration: added users.trakt_byw_movies_list_id column")
+    if "trakt_byw_shows_list_id" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN trakt_byw_shows_list_id INTEGER")
+        )
+        logger.info("migration: added users.trakt_byw_shows_list_id column")
+
+
+async def _migrate_add_preference_columns(conn) -> None:
+    """Add `onboarding_answers` + `vibe_summary` to existing user_preferences.
+
+    The table itself is created by `Base.metadata.create_all` for installs
+    that already had v1.1.0; this migration only matters for the brief
+    window between v1.1.0 and the conversational onboarding ship.
+    """
+    rows = await conn.execute(text("PRAGMA table_info(user_preferences)"))
+    existing_cols = {row[1] for row in rows.fetchall()}
+    if not existing_cols:
+        return  # table doesn't exist yet — create_all will handle it cleanly
+    if "onboarding_answers" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE user_preferences ADD COLUMN onboarding_answers JSON")
+        )
+        logger.info("migration: added user_preferences.onboarding_answers column")
+    if "vibe_summary" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE user_preferences ADD COLUMN vibe_summary VARCHAR")
+        )
+        logger.info("migration: added user_preferences.vibe_summary column")
 
 
 async def _backfill_accounts_for_orphan_users() -> None:
@@ -100,6 +133,7 @@ async def init_db() -> None:
 
     async with engine.begin() as conn:
         await _migrate_add_user_account_columns(conn)
+        await _migrate_add_preference_columns(conn)
         await conn.run_sync(Base.metadata.create_all)
 
     await _backfill_accounts_for_orphan_users()

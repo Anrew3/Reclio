@@ -37,6 +37,10 @@ class User(Base):
 
     trakt_rec_movies_list_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trakt_rec_shows_list_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # "Because You Watched" managed lists. Populated by user_sync via
+    # Recombee item-to-item — naturally exclude already-watched titles.
+    trakt_byw_movies_list_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    trakt_byw_shows_list_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trakt_watchprogress_list_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trakt_watchlist_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 

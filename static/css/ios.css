@@ -357,16 +357,16 @@ p { margin: 0; }
 
 /* Recently Watched rail */
 
+.recent-card { padding: 20px 0 16px; }   /* posters bleed cleanly to card edges */
+.recent-card > h3,
+.recent-card > .subheadline { padding: 0 20px; }
 .recent-card .subheadline { margin-top: 4px; margin-bottom: 14px; }
 
 .recent-row {
   display: flex;
   gap: 12px;
   overflow-x: auto;
-  padding-bottom: 6px;
-  margin: 0 -20px;            /* bleed to card edges */
-  padding-left: 20px;
-  padding-right: 20px;
+  padding: 4px 20px 8px;       /* full inset — no negative margin clipping */
   scroll-snap-type: x proximity;
   scrollbar-width: none;
   -webkit-overflow-scrolling: touch;
@@ -549,55 +549,61 @@ p { margin: 0; }
   margin-top: 2px;
 }
 
-/* ---------- Onboarding form ---------- */
+/* ---------- Onboarding (conversational) ---------- */
 
 .prefs-form .ios-card { margin-bottom: 16px; }
 
-.slider-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 10px 0 6px;
+.hero-card .callout { margin-top: 8px; }
+
+.vibe-card .vibe-text {
+  font-size: 17px;
+  font-style: italic;
+  color: var(--label-primary);
+  margin-top: 8px;
+  line-height: 1.45;
 }
 
-.slider-end {
+.warn-card { background: rgba(255, 159, 10, 0.08); }
+.warn-card .footnote { color: var(--label-secondary); }
+.warn-card code {
+  background: rgba(255, 159, 10, 0.18);
+  color: var(--accent-orange);
+  padding: 1px 6px;
+  border-radius: 4px;
   font-size: 12px;
-  color: var(--label-tertiary);
-  flex-shrink: 0;
-  min-width: 60px;
 }
 
-.slider-end:last-child { text-align: right; }
+.question-card .caption { margin-bottom: 6px; }
 
-.ios-slider {
-  flex: 1;
-  -webkit-appearance: none;
-  appearance: none;
-  height: 4px;
-  border-radius: 2px;
+.question-label {
+  display: block;
+  margin-bottom: 12px;
+  line-height: 1.3;
+}
+
+.ios-textarea {
+  width: 100%;
   background: var(--bg-tertiary);
+  color: var(--label-primary);
+  border: 1px solid var(--separator);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 16px;
+  font-family: inherit;
+  line-height: 1.4;
+  resize: none;
   outline: none;
+  transition: border-color 120ms ease, background 120ms ease;
+  min-height: 56px;
 }
 
-.ios-slider::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: white;
-  cursor: pointer;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+.ios-textarea:focus {
+  border-color: var(--accent-blue);
+  background: rgba(28, 28, 30, 0.85);
 }
 
-.ios-slider::-moz-range-thumb {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  background: white;
-  cursor: pointer;
-  border: none;
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+.ios-textarea::placeholder {
+  color: var(--label-tertiary);
 }
 
 .pill-row--select { margin-top: 12px; }
@@ -605,22 +611,32 @@ p { margin: 0; }
 .genre-pill--toggle {
   cursor: pointer;
   user-select: none;
+  -webkit-tap-highlight-color: transparent;
   display: inline-flex;
   align-items: center;
-  transition: background 120ms ease, color 120ms ease;
+  transition: background 120ms ease, color 120ms ease, transform 120ms ease;
+  position: relative;
 }
 
 .genre-pill--toggle input {
   position: absolute;
+  inset: 0;
   opacity: 0;
-  pointer-events: none;
-  width: 0;
-  height: 0;
+  cursor: pointer;
+  margin: 0;
 }
 
+.genre-pill--toggle:active { transform: scale(0.96); }
 .genre-pill--toggle:hover { background: var(--fill-primary); }
 
-.genre-pill--toggle.excluded {
+/* Live :has-driven state — overrides server-rendered .top / .excluded */
+.genre-pill--toggle:has(input:checked) {
+  background: rgba(10, 132, 255, 0.2);
+  color: var(--accent-blue);
+}
+
+.genre-pill--toggle.excluded,
+.genre-pill--toggle:has(input[name^="excluded_"]:checked) {
   background: rgba(255, 69, 58, 0.18);
   color: var(--accent-red);
   text-decoration: line-through;
@@ -667,6 +683,144 @@ p { margin: 0; }
 
 .ios-toggle:checked::before {
   transform: translateX(20px);
+}
+
+/* ---------- Floating Ask Reclio FAB + slide-up panel ---------- */
+
+.ask-fab {
+  position: fixed;
+  right: calc(env(safe-area-inset-right, 0px) + 20px);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  border: none;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(10, 132, 255, 0.45),
+              0 2px 6px rgba(0, 0, 0, 0.4);
+  z-index: 60;
+  transition: transform 200ms cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 160ms ease;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ask-fab:hover { transform: scale(1.06); }
+.ask-fab:active { transform: scale(0.94); }
+.ask-fab[aria-expanded="true"] { transform: scale(0.9); opacity: 0.8; }
+
+.ask-fab svg { position: relative; z-index: 2; }
+
+.ask-fab-pulse {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: rgba(10, 132, 255, 0.5);
+  z-index: 1;
+  animation: fab-pulse 2.4s ease-out infinite;
+  pointer-events: none;
+}
+
+@keyframes fab-pulse {
+  0%   { transform: scale(0.8); opacity: 0.6; }
+  70%  { transform: scale(1.4); opacity: 0; }
+  100% { transform: scale(1.4); opacity: 0; }
+}
+
+.ask-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0);
+  z-index: 50;
+  pointer-events: none;
+  transition: background 200ms ease;
+}
+.ask-backdrop.open {
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.ask-panel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-width: 600px;
+  margin: 0 auto;
+  background: var(--bg-secondary);
+  border-radius: 24px 24px 0 0;
+  padding: 12px 20px calc(env(safe-area-inset-bottom, 0px) + 20px);
+  box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.6);
+  z-index: 55;
+  transform: translateY(110%);
+  transition: transform 320ms cubic-bezier(0.32, 0.72, 0.27, 1);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 75vh;
+}
+
+.ask-panel.open { transform: translateY(0); }
+
+.ask-panel-handle {
+  width: 36px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--separator);
+  margin: 0 auto 4px;
+}
+
+.ask-panel-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.ask-panel-close {
+  background: var(--fill-primary);
+  color: var(--label-primary);
+  border: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.ask-panel-close:hover { background: var(--fill-tertiary); }
+
+.ask-panel .chat-thread {
+  flex: 1;
+  min-height: 100px;
+  max-height: 50vh;
+  margin-bottom: 4px;
+}
+
+.ask-suggest-label { margin: 4px 0 0; }
+
+.ask-quick-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.ask-quick-row .suggestion {
+  width: auto;
+  flex: 0 0 auto;
+  font-size: 13px;
+  padding: 8px 12px;
+}
+
+@media (max-width: 480px) {
+  .ask-fab { width: 56px; height: 56px; bottom: calc(env(safe-area-inset-bottom, 0px) + 18px); right: 18px; }
 }
 
 /* ---------- Ask Reclio chat ---------- */

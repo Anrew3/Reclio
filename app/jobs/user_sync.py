@@ -235,16 +235,45 @@ async def sync_one_user(user_id: str) -> None:
             last_sync = user.last_history_sync
             new_cutoff = await _push_interactions(user_id, token, last_sync)
 
-            # 2. Pull recommendations from Recombee
+            # 2. Pull recommendations from Recombee — both the headline
+            #    "Recommended For You" and the BYW lists. Item-to-item
+            #    recommendations naturally exclude what the target user
+            #    has already watched, so BYW rows never repeat.
             recombee = get_recombee()
             movie_recs: list[str] = []
             show_recs: list[str] = []
+            byw_movie_recs: list[str] = []
+            byw_show_recs: list[str] = []
+
+            taste = await session.get(TasteCache, user_id)
+            byw_movie_anchor = (
+                f"movie_{taste.last_watched_movie_tmdb_id}"
+                if taste and taste.last_watched_movie_tmdb_id else None
+            )
+            byw_show_anchor = (
+                f"tv_{taste.last_watched_show_tmdb_id}"
+                if taste and taste.last_watched_show_tmdb_id else None
+            )
+
             if recombee.available:
                 try:
-                    movie_recs, show_recs = await asyncio.gather(
+                    coros = [
                         recombee.get_recommendations(user_id, count=50, filter_media_type="movie"),
                         recombee.get_recommendations(user_id, count=50, filter_media_type="tv"),
-                    )
+                        (
+                            recombee.recommend_items_to_item(
+                                byw_movie_anchor, user_id, count=25, filter_media_type="movie",
+                            )
+                            if byw_movie_anchor else asyncio.sleep(0, result=[])
+                        ),
+                        (
+                            recombee.recommend_items_to_item(
+                                byw_show_anchor, user_id, count=25, filter_media_type="tv",
+                            )
+                            if byw_show_anchor else asyncio.sleep(0, result=[])
+                        ),
+                    ]
+                    movie_recs, show_recs, byw_movie_recs, byw_show_recs = await asyncio.gather(*coros)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("user_sync: recombee recs failed for %s: %s", user_id, exc)
 
@@ -253,6 +282,8 @@ async def sync_one_user(user_id: str) -> None:
                 await asyncio.gather(
                     _refresh_managed_list(user, token, user.trakt_rec_movies_list_id, movie_recs, "movies"),
                     _refresh_managed_list(user, token, user.trakt_rec_shows_list_id, show_recs, "shows"),
+                    _refresh_managed_list(user, token, user.trakt_byw_movies_list_id, byw_movie_recs, "movies"),
+                    _refresh_managed_list(user, token, user.trakt_byw_shows_list_id, byw_show_recs, "shows"),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("user_sync: list refresh failed for %s: %s", user_id, exc)

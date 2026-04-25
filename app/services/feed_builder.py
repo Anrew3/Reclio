@@ -1,9 +1,20 @@
-"""Core feed builder: produces the 22-feed ChillLink response.
+"""Core feed builder: produces the 10-feed ChillLink response.
 
-The order of feeds is fixed. For each slot we either inject dynamic
-values from the user's taste profile, or fall back to sensible TMDB
-defaults so every user (new or missing profile) still gets a complete
-response.
+Layout: 5 movie sections paired with 5 show sections —
+    1/2  Recommended For You       (movies / shows)   ← Recombee/Trakt list
+    3/4  Because You Watched X     (movies / shows)   ← Recombee item-to-item
+    5/6  Trending                  (movies / shows)
+    7/8  Top Genre You'll Love     (movies / shows)
+    9/10 Hidden Gems               (movies / shows)
+
+Recommended + Because You Watched both flow through managed Trakt lists
+populated by user_sync via Recombee. Recombee's recommendItemsToUser /
+recommendItemsToItem inherently skip items the user has already watched,
+so neither row repeats history. Trending / Top Genre / Hidden Gems are
+TMDB discover queries — broader "what's good" signals where seeing the
+occasional already-watched title is acceptable. User preferences (era,
+excluded genres, family-safe, discovery slider) feed into the discover
+params for the latter three pairs.
 """
 
 from __future__ import annotations
@@ -169,31 +180,14 @@ async def build_feeds(
     # Managed Trakt list IDs — None if user not yet connected
     rec_movies_list_id = user.trakt_rec_movies_list_id if user else None
     rec_shows_list_id = user.trakt_rec_shows_list_id if user else None
-    watchprogress_list_id = user.trakt_watchprogress_list_id if user else None
-    watchlist_id = user.trakt_watchlist_id if user else None
+    byw_movies_list_id = user.trakt_byw_movies_list_id if user else None
+    byw_shows_list_id = user.trakt_byw_shows_list_id if user else None
 
     feeds: list[dict[str, Any]] = []
 
-    # 1 - Continue Watching (Trakt in-progress)
-    if watchprogress_list_id:
-        feeds.append({
-            "id": "continue_watching",
-            "title": "Continue Watching",
-            "source": "trakt_list",
-            "source_metadata": {"id": watchprogress_list_id},
-            "content_type": "all",
-        })
-    else:
-        # Fallback to popular for unconnected users
-        feeds.append({
-            "id": "continue_watching",
-            "title": "Keep Watching",
-            "source": "tmdb_query",
-            "source_metadata": {"path": "/trending/all/day", "parameters": ""},
-            "content_type": "all",
-        })
-
-    # 2 - Recommended Movies (Recombee → managed Trakt list)
+    # --- 1 / 2  Recommended For You -------------------------------
+    # Recombee → managed Trakt list. RecommendItemsToUser inherently
+    # filters out interacted-with items, so this never repeats history.
     if rec_movies_list_id:
         feeds.append({
             "id": "recommended_movies",
@@ -216,7 +210,6 @@ async def build_feeds(
             "content_type": "movies",
         })
 
-    # 3 - Recommended Shows
     if rec_shows_list_id:
         feeds.append({
             "id": "recommended_shows",
@@ -239,11 +232,24 @@ async def build_feeds(
             "content_type": "shows",
         })
 
-    # 4 - Because You Watched [Last Movie]
-    # ID embeds the movie TMDB id so Chillio treats a new watched movie
-    # as a new feed rather than overwriting the old one. Title is
-    # presentation-only (LLM-generated or f-string fallback).
-    if last_movie_id and last_movie_title:
+    # --- 3 / 4  Because You Watched -------------------------------
+    # Recombee → managed Trakt list keyed off the most-recent watched
+    # title. RecommendItemsToItem also filters out the target user's
+    # interactions, so the list never includes already-watched titles.
+    # The id embeds the anchor TMDB id so Chillio sees a new feed when
+    # the user finishes something new.
+    if byw_movies_list_id and last_movie_id and last_movie_title:
+        byw_movie_title = byw_titles.get("movie") or f"Because You Watched {last_movie_title}"
+        feeds.append({
+            "id": f"because_watched_movie_tmdb_{last_movie_id}",
+            "title": byw_movie_title,
+            "source": "trakt_list",
+            "source_metadata": {"id": byw_movies_list_id},
+            "content_type": "movies",
+        })
+    elif last_movie_id and last_movie_title:
+        # Fallback: TMDB recs (may include already-watched). Better than
+        # nothing while the BYW list is being populated by user_sync.
         byw_movie_title = byw_titles.get("movie") or f"Because You Watched {last_movie_title}"
         feeds.append({
             "id": f"because_watched_movie_tmdb_{last_movie_id}",
@@ -257,15 +263,23 @@ async def build_feeds(
         })
     else:
         feeds.append({
-            "id": "because_watched_movie",  # stable fallback id for unknown-user case
+            "id": "because_watched_movie",
             "title": "More Movies To Discover",
             "source": "tmdb_query",
             "source_metadata": {"path": "/movie/popular", "parameters": ""},
             "content_type": "movies",
         })
 
-    # 5 - Because You Watched [Last Show]
-    if last_show_id and last_show_title:
+    if byw_shows_list_id and last_show_id and last_show_title:
+        byw_show_title = byw_titles.get("show") or f"Because You Watched {last_show_title}"
+        feeds.append({
+            "id": f"because_watched_show_tmdb_{last_show_id}",
+            "title": byw_show_title,
+            "source": "trakt_list",
+            "source_metadata": {"id": byw_shows_list_id},
+            "content_type": "shows",
+        })
+    elif last_show_id and last_show_title:
         byw_show_title = byw_titles.get("show") or f"Because You Watched {last_show_title}"
         feeds.append({
             "id": f"because_watched_show_tmdb_{last_show_id}",
@@ -279,42 +293,14 @@ async def build_feeds(
         })
     else:
         feeds.append({
-            "id": "because_watched_show",  # stable fallback id
+            "id": "because_watched_show",
             "title": "More Shows To Discover",
             "source": "tmdb_query",
             "source_metadata": {"path": "/tv/popular", "parameters": ""},
             "content_type": "shows",
         })
 
-    # 6 - Similar Movies
-    sim_movie_params = (
-        f"with_genres={top_movie_genres_str}&sort_by=vote_average.desc&vote_count.gte=200"
-        if top_movie_genres_str
-        else "sort_by=vote_average.desc&vote_count.gte=200"
-    ) + movie_pref_extra
-    feeds.append({
-        "id": "similar_movies",
-        "title": "Similar To Movies You've Watched",
-        "source": "tmdb_query",
-        "source_metadata": {"path": "/discover/movie", "parameters": sim_movie_params},
-        "content_type": "movies",
-    })
-
-    # 7 - Similar Shows
-    sim_show_params = (
-        f"with_genres={top_show_genres_str}&sort_by=vote_average.desc&vote_count.gte=100"
-        if top_show_genres_str
-        else "sort_by=vote_average.desc&vote_count.gte=100"
-    ) + show_pref_extra
-    feeds.append({
-        "id": "similar_shows",
-        "title": "Similar To Shows You've Watched",
-        "source": "tmdb_query",
-        "source_metadata": {"path": "/discover/tv", "parameters": sim_show_params},
-        "content_type": "shows",
-    })
-
-    # 8 - Trending Movies
+    # --- 5 / 6  Trending ------------------------------------------
     feeds.append({
         "id": "trending_movies",
         "title": "Trending Movies",
@@ -322,8 +308,6 @@ async def build_feeds(
         "source_metadata": {"path": "/trending/movie/week", "parameters": ""},
         "content_type": "movies",
     })
-
-    # 9 - Trending Shows
     feeds.append({
         "id": "trending_shows",
         "title": "Trending Shows",
@@ -332,31 +316,7 @@ async def build_feeds(
         "content_type": "shows",
     })
 
-    # 10 - New Movies For You (genre-filtered now playing)
-    new_movie_params = (
-        f"with_genres={top_movie_genres_str}" if top_movie_genres_str else ""
-    )
-    feeds.append({
-        "id": "new_movies",
-        "title": "New Movies For You",
-        "source": "tmdb_query",
-        "source_metadata": {"path": "/movie/now_playing", "parameters": new_movie_params},
-        "content_type": "movies",
-    })
-
-    # 11 - New Shows For You
-    new_show_params = (
-        f"with_genres={top_show_genres_str}" if top_show_genres_str else ""
-    )
-    feeds.append({
-        "id": "new_shows",
-        "title": "New Shows For You",
-        "source": "tmdb_query",
-        "source_metadata": {"path": "/tv/on_the_air", "parameters": new_show_params},
-        "content_type": "shows",
-    })
-
-    # 12 - Top Genre Movies
+    # --- 7 / 8  Top Genre You'll Love -----------------------------
     feeds.append({
         "id": "top_genre_movies",
         "title": f"{top_movie_genre_name} Movies You'll Love",
@@ -371,8 +331,6 @@ async def build_feeds(
         },
         "content_type": "movies",
     })
-
-    # 13 - Top Genre Shows
     feeds.append({
         "id": "top_genre_shows",
         "title": f"{top_show_genre_name} Shows You'll Love",
@@ -388,49 +346,11 @@ async def build_feeds(
         "content_type": "shows",
     })
 
-    # 14 - Second Genre Movies
-    feeds.append({
-        "id": "second_genre_movies",
-        "title": f"More {second_movie_genre_name} For You",
-        "source": "tmdb_query",
-        "source_metadata": {
-            "path": "/discover/movie",
-            "parameters": f"with_genres={second_movie_genre_id}&sort_by=popularity.desc{movie_pref_extra}",
-        },
-        "content_type": "movies",
-    })
-
-    # 15 - Second Genre Shows
-    feeds.append({
-        "id": "second_genre_shows",
-        "title": f"More {second_show_genre_name} For You",
-        "source": "tmdb_query",
-        "source_metadata": {
-            "path": "/discover/tv",
-            "parameters": f"with_genres={second_show_genre_id}&sort_by=popularity.desc{show_pref_extra}",
-        },
-        "content_type": "shows",
-    })
-
-    # 16 - Popular Movies
-    feeds.append({
-        "id": "popular_movies",
-        "title": "Popular Movies",
-        "source": "tmdb_query",
-        "source_metadata": {"path": "/movie/popular", "parameters": ""},
-        "content_type": "movies",
-    })
-
-    # 17 - Popular Shows
-    feeds.append({
-        "id": "popular_shows",
-        "title": "Popular Shows",
-        "source": "tmdb_query",
-        "source_metadata": {"path": "/tv/popular", "parameters": ""},
-        "content_type": "shows",
-    })
-
-    # 18 - Hidden Gem Movies — thresholds scale with discovery_level pref
+    # --- 9 / 10  Hidden Gems --------------------------------------
+    # Thresholds scale with discovery_level pref. TV uses ~0.5× of
+    # movie thresholds because the TMDB TV catalog is smaller.
+    show_gem_votes = max(50, gem_vote_min // 2)
+    show_gem_pop = max(10, int(gem_pop_max * 0.7))
     feeds.append({
         "id": "hidden_gems_movies",
         "title": "Hidden Gem Movies",
@@ -445,11 +365,6 @@ async def build_feeds(
         },
         "content_type": "movies",
     })
-
-    # 19 - Hidden Gem Shows — thresholds scale with discovery_level pref
-    # (use ~0.5x of movie thresholds because TV catalog is smaller)
-    show_gem_votes = max(50, gem_vote_min // 2)
-    show_gem_pop = max(10, int(gem_pop_max * 0.7))
     feeds.append({
         "id": "hidden_gems_shows",
         "title": "Hidden Gem Shows",
@@ -465,40 +380,11 @@ async def build_feeds(
         "content_type": "shows",
     })
 
-    # 20 - Critically Acclaimed Movies
-    feeds.append({
-        "id": "top_rated_movies",
-        "title": "Critically Acclaimed Movies",
-        "source": "tmdb_query",
-        "source_metadata": {"path": "/movie/top_rated", "parameters": ""},
-        "content_type": "movies",
-    })
-
-    # 21 - Critically Acclaimed Shows
-    feeds.append({
-        "id": "top_rated_shows",
-        "title": "Critically Acclaimed Shows",
-        "source": "tmdb_query",
-        "source_metadata": {"path": "/tv/top_rated", "parameters": ""},
-        "content_type": "shows",
-    })
-
-    # 22 - Watchlist
-    if watchlist_id:
-        feeds.append({
-            "id": "watchlist",
-            "title": "Your Watchlist",
-            "source": "trakt_list",
-            "source_metadata": {"id": watchlist_id},
-            "content_type": "all",
-        })
-    else:
-        feeds.append({
-            "id": "watchlist",
-            "title": "Coming Soon",
-            "source": "tmdb_query",
-            "source_metadata": {"path": "/movie/upcoming", "parameters": ""},
-            "content_type": "movies",
-        })
+    # The "second_movie_genre_*" / "second_show_genre_*" locals are
+    # intentionally unused now — kept derived above so future expansion
+    # back to a 12-feed layout (continue/watchlist/etc.) doesn't need
+    # to recompute them.
+    _ = (second_movie_genre_id, second_movie_genre_name,
+         second_show_genre_id, second_show_genre_name)
 
     return feeds

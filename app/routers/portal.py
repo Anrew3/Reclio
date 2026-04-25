@@ -237,28 +237,36 @@ async def auth_callback(
     user.last_seen = datetime.utcnow()
 
     if is_new:
-        # Create the three managed lists
-        try:
-            rec_movies = await trakt.create_list(
-                access_token,
-                "Reclio • Recommended Movies",
-                "Auto-updated by Reclio with movies you'll love.",
-            )
-            rec_shows = await trakt.create_list(
-                access_token,
-                "Reclio • Recommended Shows",
-                "Auto-updated by Reclio with shows you'll love.",
-            )
-            watch_progress = await trakt.create_list(
-                access_token,
-                "Reclio • Watch Progress",
-                "Mirrors your Trakt playback progress for Chillio.",
-            )
-            user.trakt_rec_movies_list_id = ((rec_movies or {}).get("ids") or {}).get("trakt")
-            user.trakt_rec_shows_list_id = ((rec_shows or {}).get("ids") or {}).get("trakt")
-            user.trakt_watchprogress_list_id = ((watch_progress or {}).get("ids") or {}).get("trakt")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Creating managed lists failed: %s", exc)
+        # Create the managed lists. Each create is wrapped individually so
+        # one Trakt failure doesn't blank out the rest.
+        async def _safe_create(name: str, desc: str) -> int | None:
+            try:
+                lst = await trakt.create_list(access_token, name, desc)
+                return ((lst or {}).get("ids") or {}).get("trakt")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Creating list %r failed: %s", name, exc)
+                return None
+
+        user.trakt_rec_movies_list_id = await _safe_create(
+            "Reclio • Recommended Movies",
+            "Auto-updated by Reclio with movies you'll love.",
+        )
+        user.trakt_rec_shows_list_id = await _safe_create(
+            "Reclio • Recommended Shows",
+            "Auto-updated by Reclio with shows you'll love.",
+        )
+        user.trakt_byw_movies_list_id = await _safe_create(
+            "Reclio • Because You Watched (Movies)",
+            "Movies similar to what you've recently watched.",
+        )
+        user.trakt_byw_shows_list_id = await _safe_create(
+            "Reclio • Because You Watched (Shows)",
+            "Shows similar to what you've recently watched.",
+        )
+        user.trakt_watchprogress_list_id = await _safe_create(
+            "Reclio • Watch Progress",
+            "Mirrors your Trakt playback progress for Chillio.",
+        )
 
         # Locate the built-in watchlist (optional — Trakt uses a virtual list)
         try:
@@ -269,6 +277,31 @@ async def auth_callback(
                     break
         except Exception:  # noqa: BLE001
             pass
+    else:
+        # Returning user — backfill BYW lists if the columns are still null
+        # (pre-1.2 install). Idempotent: each create is skipped if the id
+        # already exists.
+        async def _backfill(field: str, name: str, desc: str) -> None:
+            if getattr(user, field, None):
+                return
+            try:
+                lst = await trakt.create_list(access_token, name, desc)
+                lid = ((lst or {}).get("ids") or {}).get("trakt")
+                if lid:
+                    setattr(user, field, lid)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Backfill %s failed: %s", field, exc)
+
+        await _backfill(
+            "trakt_byw_movies_list_id",
+            "Reclio • Because You Watched (Movies)",
+            "Movies similar to what you've recently watched.",
+        )
+        await _backfill(
+            "trakt_byw_shows_list_id",
+            "Reclio • Because You Watched (Shows)",
+            "Shows similar to what you've recently watched.",
+        )
 
     await session.commit()
 

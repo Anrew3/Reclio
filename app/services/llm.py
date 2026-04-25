@@ -345,6 +345,115 @@ class LLMService:
         self._cache.set(key, cleaned)
         return cleaned
 
+    async def derive_preferences(
+        self,
+        answers: dict[str, str],
+        *,
+        mood_palette: list[str],
+        movie_genres: dict[int, str],
+        tv_genres: dict[int, str],
+    ) -> dict[str, Any] | None:
+        """Turn open-ended onboarding answers into a structured preference
+        profile. Returns dict with keys:
+            favorite_moods (list[str], whitelisted against mood_palette)
+            excluded_movie_genres (list[int])
+            excluded_show_genres (list[int])
+            era_preference (int 0..100)
+            family_safe (bool)
+            vibe_summary (str, ≤2 sentences)
+
+        Returns None if the LLM is unavailable. Callers handle None by
+        leaving the existing preference values in place.
+        """
+        if not self.enabled:
+            return None
+        # Build a tight prompt. Numbered options keep the model on rails.
+        safe_answers = "\n".join(
+            f"Q: {sanitize_for_prompt(q, 80)}\nA: {sanitize_for_prompt(a, 400)}"
+            for q, a in answers.items()
+            if a and a.strip()
+        )
+        if not safe_answers:
+            return None
+
+        moods_str = ", ".join(mood_palette)
+        movie_g_str = ", ".join(f"{n}={i}" for i, n in movie_genres.items())
+        tv_g_str = ", ".join(f"{n}={i}" for i, n in tv_genres.items())
+
+        prompt = (
+            "You are a movie preference analyst. Read the viewer's answers and\n"
+            "infer their taste profile. Respond with ONLY a JSON object — no\n"
+            "prose, no markdown fence — matching this exact schema:\n"
+            "{\n"
+            '  "favorite_moods": [strings from this list only: ' + moods_str + "],\n"
+            '  "excluded_movie_genres": [integer TMDB movie genre IDs],\n'
+            '  "excluded_show_genres": [integer TMDB tv genre IDs],\n'
+            '  "era_preference": integer 0..100  (0=loves classics only, 50=no preference, 100=loves new only),\n'
+            '  "family_safe": boolean,\n'
+            '  "vibe_summary": "1-2 sentence warm description of their taste, max 200 chars"\n'
+            "}\n"
+            "Movie genre IDs: " + movie_g_str + "\n"
+            "TV genre IDs: " + tv_g_str + "\n\n"
+            "Viewer answers:\n" + safe_answers + "\n\n"
+            "JSON:"
+        )
+
+        result = await self.provider.generate(prompt, max_tokens=600, temperature=0.3)
+        if not result:
+            return None
+
+        # Some models wrap in ```json fences; strip defensively.
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].lstrip()
+            cleaned = cleaned.split("```", 1)[0].strip()
+        # Take the JSON object substring if there's chatter around it.
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            import json
+            parsed = json.loads(cleaned[start:end + 1])
+        except (ValueError, TypeError):
+            return None
+
+        # Whitelist + clamp every field. We don't trust the LLM for type or
+        # bounds — bad values would corrupt the prefs row otherwise.
+        allowed_moods = set(mood_palette)
+        favorite_moods = [
+            m for m in (parsed.get("favorite_moods") or [])
+            if isinstance(m, str) and m in allowed_moods
+        ]
+        movie_g_set = set(movie_genres.keys())
+        tv_g_set = set(tv_genres.keys())
+        ex_movie = [
+            int(g) for g in (parsed.get("excluded_movie_genres") or [])
+            if isinstance(g, (int, float)) and int(g) in movie_g_set
+        ]
+        ex_show = [
+            int(g) for g in (parsed.get("excluded_show_genres") or [])
+            if isinstance(g, (int, float)) and int(g) in tv_g_set
+        ]
+        try:
+            era = int(parsed.get("era_preference", 50))
+        except (TypeError, ValueError):
+            era = 50
+        era = max(0, min(100, era))
+        family_safe = bool(parsed.get("family_safe", False))
+        vibe = str(parsed.get("vibe_summary") or "").strip()[:240]
+
+        return {
+            "favorite_moods": favorite_moods,
+            "excluded_movie_genres": ex_movie,
+            "excluded_show_genres": ex_show,
+            "era_preference": era,
+            "family_safe": family_safe,
+            "vibe_summary": vibe or None,
+        }
+
     async def ask_reclio(
         self,
         question: str,

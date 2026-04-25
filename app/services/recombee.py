@@ -376,6 +376,40 @@ class RecombeeService:
             logger.debug("Recombee RecommendItemsToUser failed: %s", exc)
             return []
 
+    async def recommend_items_to_item(
+        self,
+        item_id: str,
+        target_user_id: str,
+        count: int = 25,
+        filter_media_type: str | None = None,
+    ) -> list[str]:
+        """Items similar to `item_id` for `target_user_id`.
+
+        Recombee filters out items the target user has already interacted
+        with (watched / rated / bookmarked) when target_user_id is set, so
+        the result is naturally watched-exclusive — exactly what BYW rows
+        need. Returns [] if the request fails or Recombee is disabled.
+        """
+        if not self._client:
+            return []
+        rq = self._rq
+        kwargs: dict[str, Any] = {
+            "cascade_create": True,
+            "target_user_id": target_user_id,
+        }
+        if filter_media_type:
+            kwargs["filter"] = f"'media_type' == \"{filter_media_type}\""
+        try:
+            result = await asyncio.to_thread(
+                self._client.send,
+                rq.RecommendItemsToItem(item_id, target_user_id, count, **kwargs),
+            )
+            recoms = (result or {}).get("recomms", []) if isinstance(result, dict) else []
+            return [r.get("id") for r in recoms if r.get("id")]
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Recombee RecommendItemsToItem failed: %s", exc)
+            return []
+
 
 _recombee: RecombeeService | None = None
 

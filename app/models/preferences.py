@@ -37,11 +37,21 @@ class UserPreferences(Base):
     excluded_movie_genres: Mapped[list | None] = mapped_column(JSON, nullable=True)
     excluded_show_genres: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
-    # Free-form mood tags chosen from a fixed palette in the UI.
+    # Mood tags inferred by the LLM from the conversational onboarding
+    # answers. The fixed palette lives in app.routers.onboarding.MOODS.
     favorite_moods: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     # Hide adult / mature-rated content. Maps to TMDB's `include_adult=false`
     # plus a `certification.lte=PG-13` floor on /discover queries.
     family_safe: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    # Raw open-ended answers from the conversational onboarding UI.
+    # Stored verbatim (sanitized for length) so we can re-derive preferences
+    # if the LLM extraction prompt evolves. Shape: {q_key: "answer text"}.
+    onboarding_answers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # One-paragraph LLM-written summary of the viewer's taste. Reused by
+    # Ask Reclio for context grounding. NULL until first onboarding pass.
+    vibe_summary: Mapped[str | None] = mapped_column(String, nullable=True)
 
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
