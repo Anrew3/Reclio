@@ -56,4 +56,16 @@ class User(Base):
     recent_feed_hits: Mapped[list | None] = mapped_column(JSON, nullable=True)
     last_feed_request_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
+    # --- v1.5 watch-state machine inputs --------------------------------
+    # IANA timezone (e.g. "America/Los_Angeles"). Powers the sleep
+    # heuristic — late-night drops in user-local time get the grace
+    # period; daytime drops get the strong-bounce verdict.
+    timezone: Mapped[str] = mapped_column(String, default="UTC")
+
+    # Last seen /sync/last_activities snapshot. Lets us skip the bulk
+    # of a sync tick when nothing relevant has changed. Shape:
+    # {"movies.watched_at": "iso", "episodes.watched_at": "iso", ...}
+    last_activities_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_activities_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     __table_args__ = (Index("ix_users_account_id", "account_id"),)

@@ -71,6 +71,56 @@ async def _migrate_add_user_account_columns(conn) -> None:
         logger.info("migration: added users.trakt_byw_shows_list_id column")
 
 
+async def _migrate_add_v15_user_columns(conn) -> None:
+    """v1.5: timezone + last_activities_snapshot + last_activities_seen_at."""
+    rows = await conn.execute(text("PRAGMA table_info(users)"))
+    existing_cols = {row[1] for row in rows.fetchall()}
+    if not existing_cols:
+        return
+    if "timezone" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN timezone VARCHAR DEFAULT 'UTC'")
+        )
+        logger.info("migration: added users.timezone column")
+    if "last_activities_snapshot" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN last_activities_snapshot JSON")
+        )
+        logger.info("migration: added users.last_activities_snapshot column")
+    if "last_activities_seen_at" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN last_activities_seen_at DATETIME")
+        )
+        logger.info("migration: added users.last_activities_seen_at column")
+
+
+async def _migrate_add_v15_content_embedding_columns(conn) -> None:
+    """v1.5: vector embedding columns on content_catalog."""
+    rows = await conn.execute(text("PRAGMA table_info(content_catalog)"))
+    existing_cols = {row[1] for row in rows.fetchall()}
+    if not existing_cols:
+        return
+    if "embedding" not in existing_cols:
+        await conn.execute(text("ALTER TABLE content_catalog ADD COLUMN embedding BLOB"))
+        logger.info("migration: added content_catalog.embedding column")
+    if "embedding_dim" not in existing_cols:
+        await conn.execute(text("ALTER TABLE content_catalog ADD COLUMN embedding_dim INTEGER"))
+        logger.info("migration: added content_catalog.embedding_dim column")
+    if "embedding_model" not in existing_cols:
+        await conn.execute(text("ALTER TABLE content_catalog ADD COLUMN embedding_model VARCHAR"))
+        logger.info("migration: added content_catalog.embedding_model column")
+    if "embedding_source_hash" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE content_catalog ADD COLUMN embedding_source_hash VARCHAR(16)")
+        )
+        logger.info("migration: added content_catalog.embedding_source_hash column")
+    if "embedding_at" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE content_catalog ADD COLUMN embedding_at DATETIME")
+        )
+        logger.info("migration: added content_catalog.embedding_at column")
+
+
 async def _migrate_add_taste_cache_columns(conn) -> None:
     """Add v1.4 personality_summary to existing taste_cache tables."""
     rows = await conn.execute(text("PRAGMA table_info(taste_cache)"))
@@ -174,6 +224,8 @@ async def init_db() -> None:
         await _migrate_add_user_account_columns(conn)
         await _migrate_add_preference_columns(conn)
         await _migrate_add_taste_cache_columns(conn)
+        await _migrate_add_v15_user_columns(conn)
+        await _migrate_add_v15_content_embedding_columns(conn)
         await conn.run_sync(Base.metadata.create_all)
 
     await _backfill_accounts_for_orphan_users()

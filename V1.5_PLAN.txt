@@ -1,0 +1,685 @@
+================================================================
+RECLIO  v1.5  —  DESIGN PLAN
+================================================================
+
+Audience: andrewvigil@proton.me (project owner)
+Status:   draft, awaiting review before implementation
+Target:   v1.5.0 (watch-state machine) + v1.5.1 (vector embeddings)
+
+
+----------------------------------------------------------------
+0. CONTEXT — TRAKT DATA MODEL
+----------------------------------------------------------------
+
+Reclio reads Trakt. Trakt is fed by *scrobblers* (Chillio, Plex,
+Kodi, Infuse, the Trakt phone app, etc.) which PUSH watch events
+to Trakt as the user watches. Trakt assigns a UTC timestamp at
+the moment each scrobble lands.
+
+Endpoints we already consume:
+
+  /sync/history          paginated list of completed watches
+                         each entry has watched_at (ISO UTC)
+  /sync/playback         currently in-progress items
+                         each entry has paused_at + progress (0-100)
+  /sync/ratings          user-rated items, each has rated_at
+  /sync/watchlist        user's saved-for-later list, each has listed_at
+
+The endpoint we do NOT yet consume but should:
+
+  /sync/last_activities  one timestamp per category, e.g.
+                           movies.watched_at, episodes.watched_at,
+                           movies.paused_at, episodes.paused_at,
+                           movies.rated_at, watchlist.updated_at,
+                           account.settings_at  (TZ change, etc.)
+
+  Cost: single GET, no pagination, ~50ms. Cheap.
+
+KEY INSIGHT — /sync/last_activities lets us answer "did anything
+change since last sync?" in ONE cheap call. We only do the
+expensive history+playback+ratings fetches when at least one
+relevant timestamp moved.
+
+This collapses the per-tick cost for dormant users to ~50ms and
+lets us stretch the cold-sync bucket from 24h to ~weekly.
+
+
+----------------------------------------------------------------
+1. ADAPTIVE CADENCE — REVISED FOR v1.5
+----------------------------------------------------------------
+
+Today (v1.4):
+
+  hot     → every 4h
+  default → every 8h
+  cold    → every 24h
+
+  Each tick: 4 Trakt fetches per user (history movies, history shows,
+             ratings movies, ratings shows) + 1 playback + 1 watchlist
+             ≈ 6 Trakt calls per user per tick.
+
+Proposed (v1.5):
+
+  Phase A — "should we even bother?":
+    Always do 1 cheap GET /sync/last_activities first.
+    Compare each timestamp to our stored snapshot.
+    If nothing relevant moved → skip everything else, return.
+
+  Phase B — "what specifically changed?":
+    Only refetch the categories whose last_activities timestamp moved:
+      movies.watched_at moved   →  GET /sync/history/movies
+      episodes.watched_at moved →  GET /sync/history/shows
+      movies.paused_at moved    →  GET /sync/playback (movies+shows share endpoint)
+      movies.rated_at moved     →  GET /sync/ratings/movies
+      etc.
+
+  Cadence buckets become:
+
+    hot     → every 1h           (was 4h)
+    default → every 6h           (was 8h)
+    cold    → every 24h          (was 24h)
+    dormant → once per week      (NEW; users with zero last_activities
+                                  movement for 30+ days)
+
+  Net effect:
+    - Hot users: faster reaction (1h vs 4h) at LOWER total Trakt cost
+      because most ticks are just the 1 cheap activities call
+    - Dormant users: ~1 sync per week instead of 7 — huge quota saving
+    - Reclio scales to ~5x more users on the same Trakt quota
+
+Stored on the user row (new column):
+
+    last_activities_snapshot  JSON   { "movies.watched_at": "iso", ... }
+    last_activities_seen_at   DATETIME
+
+If the column is NULL we treat the user as "never synced" and run
+a full sync regardless of cadence (first connect, after a
+truncate, etc.).
+
+
+----------------------------------------------------------------
+2. WATCH-STATE MACHINE  (the v1.5.0 deliverable)
+----------------------------------------------------------------
+
+PURPOSE
+  Extract real signal from incomplete watches. Today we only learn
+  from what got logged as "watched" in /sync/history. We're throwing
+  away everything in /sync/playback (started but not finished) and
+  the time gap that follows.
+
+  Specifically: if the user starts a movie at 23:00, hits 47%, walks
+  away, and never resumes — that's a different signal from starting
+  it at 11:00 and bailing at 47%. The first looks like sleep; the
+  second looks like dislike. Today both look identical to Reclio.
+
+WHERE IT RUNS
+  Inside the existing sync_one_user() pipeline, between the
+  _push_interactions step and the recombee.get_recommendations step:
+
+    sync_one_user(user_id):
+      build_taste_profile(...)
+      _push_interactions(...)                    # existing
+      evaluate_watch_state(user_id, token)       # NEW
+      recombee.get_recommendations(...)          # existing
+      _refresh_managed_list(...)                 # existing
+
+  Reuses the per-user lock in _user_sync_locks. No new scheduled
+  job, no new cron entry. Inherits the adaptive cadence above —
+  hot user = every 1h, dormant user = weekly.
+
+  Critical ordering: feedback signals (Recombee AddRating(-X), taste
+  cache invalidation) land BEFORE the next get_recommendations call,
+  so the very next tick's recommendations already reflect the new
+  verdicts.
+
+INPUTS PER EVALUATION
+  playback_now      list[dict]    /sync/playback (cached 2min)
+  history_recent    list[dict]    history items added since last_history_sync
+  attempts_open     list[Row]     existing WatchAttempt with status='in_progress'
+  user.timezone     str           IANA tz, e.g. "America/Los_Angeles"
+
+NEW MODEL: WatchAttempt
+  Lives in app/models/watch_attempt.py.
+
+    id                       INTEGER PK autoincrement
+    user_id                  STRING FK users.id ON DELETE CASCADE  (indexed)
+
+    trakt_playback_id        INTEGER     -- Trakt's stable id for the in-progress entry
+                                         -- unique with user_id
+
+    kind                     STRING(8)   -- 'movie' or 'episode'
+    movie_tmdb_id            INTEGER NULL
+    show_tmdb_id             INTEGER NULL
+    episode_number           INTEGER NULL
+    season_number            INTEGER NULL
+
+    first_seen_at            DATETIME    -- when WE first saw the row in playback
+    last_progress_pct        FLOAT       -- 0..100 from Trakt
+    last_paused_at_utc       DATETIME    -- Trakt's paused_at, parsed
+    last_paused_local_hour   INTEGER     -- 0..23 in user's TZ; drives "sleep" check
+
+    status                   STRING(24)  -- in_progress | completed | abandoned_sleep |
+                                         -- abandoned_bounce | abandoned_lost_interest |
+                                         -- accidental
+    decided_at               DATETIME NULL
+    feedback_pushed          BOOLEAN     -- guards against double-counting
+
+    created_at, updated_at
+
+    UNIQUE (user_id, trakt_playback_id)
+    INDEX  (user_id, status)
+
+NEW USER COLUMN: timezone
+  IANA tz string. Populated during OAuth callback and refreshed
+  whenever we fetch the Trakt user profile. Default 'UTC'.
+  Trakt /users/me returns this field directly.
+
+NEW USER COLUMN: last_activities_snapshot, last_activities_seen_at
+  As described in Section 1.
+
+STATE MACHINE — MOVIES (top-to-bottom decision)
+
+  Cond 1: also appears in history_recent
+    → completed (positive signal)
+
+  Cond 2: last_progress_pct >= 90
+    → completed (treating "skipped credits" as success)
+
+  Cond 3: last_progress_pct < 5 AND age >= 24h
+    → accidental (drop the row, no signal)
+
+  Cond 4: last_paused_local_hour in [22, 23, 0, 1, 2, 3, 4]
+          AND 5 <= last_progress_pct <= 90
+          AND age >= 5 days
+    → abandoned_sleep
+    Rationale: late-night drop is most likely "fell asleep". Wait
+    a generous grace period in case they resume, then count it as
+    a *mild* negative — they didn't hate it, they just didn't finish.
+
+  Cond 5: last_paused_local_hour NOT in sleep window
+          AND 5 <= last_progress_pct <= 90
+          AND age >= 24h
+    → abandoned_bounce
+    Rationale: daytime drop with no resume in 24h is much more
+    likely a real "I didn't like this".
+
+  Cond 6: still in playback_now OR none of the above timeouts hit
+    → stays in_progress (re-check next tick)
+
+STATE MACHINE — SHOWS (per-episode, with show context)
+
+  Need to know how many episodes deep the user is in this show.
+  Pulled from Trakt /users/me/watched/shows (already in cache from
+  _push_interactions; expose plays_count_for_show(show_id) helper).
+
+  Cond 1: episode appears in history_recent
+    AND next episode appears in playback within 24h
+    → completed (no signal — they're moving through)
+
+  Cond 2: episode in history_recent
+    AND no follow-up in playback within 7d
+    AND series_episodes_watched <= 3
+    → abandoned_bounce (mild — finished S1E1 but bounced)
+
+  Cond 3: season_number == 1 AND episode_number == 1
+          AND last_progress_pct < 50
+          AND age >= 48h
+    → abandoned_bounce  (LOUDEST signal — first ep, didn't even finish)
+
+  Cond 4: 2+ seasons watched per Trakt history
+          AND no progress in 14d
+    → abandoned_lost_interest  (positive on genre, neutral on show)
+
+  Cond 5: mid-season pause (E>=2 of S1, or any E of S>=2)
+          AND last_paused < 30d
+    → stays in_progress  (normal — shows pause)
+
+SIGNAL FEEDBACK (per decision)
+
+  decided=completed (movie):
+    Recombee AddRating(+0.5)
+    Taste profile: light genre boost (already implicit via /sync/history push)
+
+  decided=accidental:
+    nothing
+
+  decided=abandoned_sleep:
+    Recombee AddRating(-0.2)
+    Taste profile: nothing — sleep is not dislike
+
+  decided=abandoned_bounce (movie):
+    Recombee AddRating(-0.7)
+    Taste profile: -5% to top genres of that movie; mark is_stale
+
+  decided=abandoned_bounce (S1E1 of show):
+    Recombee AddRating(-1.0) on the SHOW (not the episode)
+    Taste profile: -10% to show's top genres
+    This is intentionally the strongest single signal in the system.
+
+  decided=abandoned_lost_interest:
+    Nothing on the show itself
+    Taste profile: light positive on the show's top genres
+    Rationale: they invested seasons of time, they liked the GENRE
+    even if they ran out of bandwidth for THIS show.
+
+EDGE CASES
+
+  Re-watch:
+    Trakt assigns a new playback_id when the user re-starts something.
+    A new WatchAttempt row is created. The original is left at its
+    decided status.
+
+  User changes timezone:
+    last_paused_local_hour is recomputed at decision time using the
+    user's CURRENT timezone, not the timezone at the time of pause.
+    Deliberate simplification — the sleep heuristic should match where
+    they live, not where they happened to be when traveling.
+
+  DST transitions:
+    Sleep window [22-04] is wide enough that a DST jump cannot push
+    a non-sleep-time event into the window or vice versa.
+
+  Trakt outage during eval:
+    If /sync/playback fails, evaluator skips and waits for the next
+    tick. State doesn't progress; nothing gets a false "abandoned"
+    verdict from missing data.
+
+  Catalog not synced yet:
+    If we can't resolve movie_tmdb_id from a Trakt item, the attempt
+    is created but feedback_pushed stays False. Re-tries next tick.
+
+  Idempotency:
+    feedback_pushed flag flips True after the Recombee + taste push
+    succeeds. Re-running the evaluator never double-counts. If the
+    push fails (Recombee outage), flag stays False and we retry.
+
+  Scale:
+    Heavy user with ~100 in-progress items: O(n) bookkeeping + at
+    most 6 Recombee calls per tick. Cheap.
+
+OBSERVABILITY
+
+  Per-tick log line:
+    "watch_state: user=X verdicts={completed:2, sleep:1, bounce:0}"
+
+  Admin endpoint:
+    GET /admin/watch_attempts/{user_id}
+    Returns all attempts (open + decided) plus counts by status.
+
+  /health adds a 'watch_state' check:
+    "ok" if at least one attempt has been evaluated in the last 24h
+    across any active user. Quietly degrades during dev installs
+    with no users.
+
+
+----------------------------------------------------------------
+3. VECTOR EMBEDDINGS  (the v1.5.1 deliverable)
+----------------------------------------------------------------
+
+PURPOSE
+  Better "similar to X" recommendations than genre tags can produce.
+  A "moody Scandinavian noir" and a "moody Korean noir" share zero
+  TMDB genre IDs but should obviously cluster together. Embeddings
+  catch this. Recombee's collaborative filtering catches some of it
+  via co-watching patterns, but cold-start items (small audiences)
+  are invisible to it. Embeddings are content-based, so cold-start
+  is a non-issue.
+
+PROVIDER UNIFICATION
+  Embeddings follow the EXISTING LLM_PROVIDER setting. No new env
+  var. Mapping:
+
+    LLM_PROVIDER=ollama   → Ollama embeddings via the same instance
+                            Default model: nomic-embed-text  (768-dim, 274 MB)
+                            Configurable via OLLAMA_EMBEDDING_MODEL env var
+
+    LLM_PROVIDER=openai   → OpenAI text-embedding-3-small  (1536-dim)
+                            Same OPENAI_API_KEY, no extra setup.
+                            Cost: $0.02 per 1M tokens (~$0.20 for 10k items)
+
+    LLM_PROVIDER=claude   → Anthropic doesn't ship embeddings.
+                            Fall back to local sentence-transformers
+                            (all-MiniLM-L6-v2, 384-dim, ~80 MB on disk).
+                            No extra service required.
+
+    LLM_PROVIDER=none     → embeddings disabled, similarity rail
+                            falls back to TMDB recommendations.
+
+  EmbeddingProvider abstract base mirrors the existing LLMProvider:
+
+    async def embed_batch(texts: list[str]) -> list[list[float]]
+    async def warmup() -> None
+    async def close() -> None
+    name: str
+    dim: int
+
+  Factory _build_embedding_provider() reads LLM_PROVIDER and returns
+  the right impl, with NullProvider as the universal fallback.
+
+WHAT WE EMBED
+  Per ContentCatalog item:
+    "{title}. {tagline}. {overview}. Genres: {names}. Keywords: {top 10}."
+  Trim at ~512 tokens (provider-side truncation safety).
+
+  Re-embed only when source changes. Track via:
+    embedding_source_hash = sha256(input_string)[:16]
+
+SCHEMA — ContentCatalog gains four columns
+  embedding              BLOB NULL    -- numpy.float32 array → tobytes()
+  embedding_dim          INTEGER NULL -- 384 / 768 / 1536 depending on provider
+  embedding_model        STRING NULL  -- 'minilm-l6-v2' | 'nomic-embed-text' | 'oai-text-3-small'
+  embedding_source_hash  STRING(16)   -- skip re-embed when unchanged
+  embedding_at           DATETIME NULL
+
+  Storage cost:
+    384-dim × 4 bytes = 1.5 KB per item
+    768-dim × 4 bytes = 3 KB per item
+    1536-dim × 4 bytes = 6 KB per item
+  10k catalog items × 768-dim = 30 MB. Fine for SQLite.
+
+WHERE EMBEDDINGS GET COMPUTED
+  In app/jobs/content_sync.py, third pass after the existing
+  TMDB-metadata-fetch + Recombee-push:
+
+    for chunk in chunked(rows where embedding IS NULL OR hash mismatch, 32):
+      texts = [_input_text(row) for row in chunk]
+      vectors = await embedding_provider.embed_batch(texts)
+      for row, vec in zip(chunk, vectors):
+        row.embedding = numpy.array(vec, dtype=float32).tobytes()
+        row.embedding_dim = len(vec)
+        row.embedding_model = embedding_provider.name
+        row.embedding_source_hash = sha256(...)
+        row.embedding_at = utcnow()
+
+  Cap each content_sync run at 200 NEW embeddings to bound run time.
+  Re-embeds on input change happen during the same scan, no separate cap.
+
+WHERE EMBEDDINGS GET QUERIED
+  New service: app/services/similarity.py
+
+    async def similar_to(tmdb_id: int, kind: str, *, k: int = 30,
+                         exclude_tmdb_ids: set[int] | None = None) -> list[int]:
+      """Return tmdb_ids of the k nearest items by cosine similarity,
+      excluding the seed item and any IDs in exclude_tmdb_ids."""
+
+  Implementation:
+    - Load catalog embedding matrix into NumPy once per process
+      (cached for 1h, invalidated by content_sync rebuild).
+    - Cosine similarity = matrix @ query_vec / (norms * |query|)
+    - Argsort descending, take top-k after exclusions.
+    - 10k×768 matrix takes ~30ms on commodity hardware. Trivial.
+
+INTEGRATION POINTS
+  3 rails get upgraded — none are completely replaced; embeddings
+  blend with existing signals.
+
+  1. Because You Watched (movies + shows)
+     Today: 100% Recombee item-to-item
+     v1.5.1: blend Recombee top-25 + vector top-25, dedupe, rank by
+             0.6 * recombee_score + 0.4 * vector_score
+             Push to managed Trakt list as before.
+             If Recombee unavailable, fall back to pure vector.
+
+  2. Recommended For You — for cold-start users
+     Today: Recombee returns nothing useful for users with < 12
+            interactions; we fall back to TMDB popular.
+     v1.5.1: seed the row with vector neighbors of the user's
+             highest-rated title from Trakt. Way more personalized
+             than "popular this week" while Recombee warms up.
+
+  3. NEW row "Vibes like X" (optional, can be 11th feed)
+     Pure vector similarity off the user's last-watched title.
+     Surfaces semantic neighbors regardless of genre tag overlap.
+     Decision deferred to you — see Open Questions.
+
+MEMORY + COST
+  Self-host with Claude (sentence-transformers fallback):
+    +250 MB resident from the model. Zero per-query cost.
+
+  Self-host with Ollama (nomic-embed-text):
+    +274 MB on disk for the model. Reused Ollama instance.
+
+  Hosted with OpenAI:
+    ~$0.02 per 1k items embedded. 10k catalog backfill = $0.20 once,
+    ~$0.01/month for incremental items thereafter.
+
+
+----------------------------------------------------------------
+4. SCHEMA SUMMARY (everything new in v1.5)
+----------------------------------------------------------------
+
+users:
+  + timezone                 STRING(64) DEFAULT 'UTC'
+  + last_activities_snapshot JSON
+  + last_activities_seen_at  DATETIME
+
+content_catalog:
+  + embedding                BLOB
+  + embedding_dim            INTEGER
+  + embedding_model          STRING
+  + embedding_source_hash    STRING(16)
+  + embedding_at             DATETIME
+
+NEW: watch_attempts (full schema in Section 2)
+
+
+----------------------------------------------------------------
+5. MIGRATION PLAN
+----------------------------------------------------------------
+
+Mirror the existing _migrate_add_*_columns pattern in
+app/database.py:
+
+  _migrate_add_watch_state_columns(conn)
+    PRAGMA table_info(users) → check
+    ALTER TABLE users ADD COLUMN timezone VARCHAR(64) DEFAULT 'UTC'
+    ALTER TABLE users ADD COLUMN last_activities_snapshot JSON
+    ALTER TABLE users ADD COLUMN last_activities_seen_at DATETIME
+
+  _migrate_add_embedding_columns(conn)
+    PRAGMA table_info(content_catalog) → check
+    ALTER TABLE content_catalog ADD COLUMN embedding BLOB
+    ALTER TABLE content_catalog ADD COLUMN embedding_dim INTEGER
+    ALTER TABLE content_catalog ADD COLUMN embedding_model VARCHAR
+    ALTER TABLE content_catalog ADD COLUMN embedding_source_hash VARCHAR(16)
+    ALTER TABLE content_catalog ADD COLUMN embedding_at DATETIME
+
+  watch_attempts table is created automatically by
+  Base.metadata.create_all — no migration needed for net-new tables.
+
+All migrations idempotent. Both run before create_all on every boot.
+
+
+----------------------------------------------------------------
+6. ROLLOUT PHASES
+----------------------------------------------------------------
+
+v1.5.0  — Watch-state machine + adaptive cadence
+  - users.timezone column + populate during OAuth callback
+  - users.last_activities_snapshot + the cheap-poll path
+  - watch_attempts table + WatchAttempt model
+  - app/jobs/watch_state.py with the state machine
+  - hook into sync_one_user
+  - admin endpoint /admin/watch_attempts/{user_id}
+  - /health watch_state check
+  - docs page docs/docs/watch-state.md
+  Ship + observe for ~2 weeks before v1.5.1.
+
+v1.5.1  — Vector embeddings + similarity rail
+  - EmbeddingProvider abstraction + 3 impls (Ollama / OpenAI / local)
+  - content_catalog embedding columns
+  - embedding pass in content_sync (capped 200/run)
+  - app/services/similarity.py
+  - feed_builder integration for BYW + cold-start Recommended
+  - admin endpoint /admin/similar/{tmdb_id} for testing
+  - docs page docs/docs/embeddings.md
+
+
+----------------------------------------------------------------
+7. TEST PLAN
+----------------------------------------------------------------
+
+Watch-state unit tests
+  Each row of the decision table in Section 2 → one test fixture.
+  Synthetic /sync/playback snapshots, assert verdict + signal.
+
+Watch-state integration test
+  Replay a 14-day sequence of (playback, history) snapshots for a
+  fixture user. Walk the clock forward day-by-day. Assert verdicts
+  appear at the expected days.
+
+Watch-state manual smoke
+  Real Trakt account starts a movie at 23:00, walks away, observes
+  abandoned_sleep verdict in /admin/watch_attempts/me ~5 days later.
+
+Embeddings unit tests
+  - Cosine similarity correctness on 8-dim synthetic vectors
+  - SHA hashing of input text (re-embed only on change)
+  - Provider factory returns the right class for each LLM_PROVIDER
+
+Embeddings smoke test
+  Embed 50 fixture overviews with the local provider.
+  Assert nearest neighbors are sensible (sci-fi clusters with sci-fi).
+
+Embeddings performance check
+  10k×768 cosine query under 100ms p95 on a commodity VPS.
+
+Adaptive cadence test
+  Simulate 100 users with varying last_activities movement.
+  Assert dormant users get exactly 1 sync/week, hot users get
+  every 1h, and most ticks for inactive users return after the
+  cheap activities call.
+
+
+----------------------------------------------------------------
+8. RISK + OBSERVABILITY
+----------------------------------------------------------------
+
+Failure modes & mitigations:
+
+  Trakt API quota:
+    The cheap-poll path REDUCES quota usage. Worst case: hot users
+    grow 4× more frequent (1h vs 4h) but each tick is one cheap
+    call most of the time. Net usage projected to drop ~80%.
+
+  False positive abandoned_bounce on a busy user:
+    User actively pauses for a week to finish another show, comes
+    back. We've already declared abandoned_bounce. Resume signal
+    creates a NEW WatchAttempt; the old verdict stays. Recombee
+    sees both AddRating(-0.7) and the new positive signals — the
+    later signals dominate. Acceptable cost.
+
+  Sleep heuristic wrong for shift workers:
+    Their "late night" is everyone else's morning. Their watches
+    look like daytime drops. They get false abandoned_bounce
+    instead of abandoned_sleep. Mitigation: future v1.6 could
+    learn each user's "personal sleep window" from their watch
+    history. Out of scope for v1.5.
+
+  Embedding provider misconfigured:
+    NullProvider returns immediately, similarity rail falls back
+    to existing TMDB recommendations. No user-facing breakage.
+
+  ContentCatalog growing past 50k items:
+    Embedding matrix would be 30MB+ × dim. Still fine in memory
+    but cold-start of the matrix slows. Mitigation: load matrix
+    on first request, not at boot. Stays cached for 1h.
+
+
+----------------------------------------------------------------
+9. OPEN QUESTIONS FOR YOU
+----------------------------------------------------------------
+
+Q1. First-episode bounce penalty strength
+    Proposal: AddRating(-1.0) on the WHOLE SHOW when someone bounces
+    from S1E1 with <50% progress.
+
+    Concern: that's harsh — they tried 20 minutes. Maybe -0.6 is
+    closer to honest.
+
+    Counter: it's the loudest signal we have. They sat down to try
+    a new show, didn't finish the pilot, walked away. -1.0 reflects
+    that.
+
+    My recommendation: keep -1.0.
+
+Q2. The 11th feed — "Vibes like X" pure-vector row
+    The 10-feed limit was your call. Want a pure-vector "Vibes like
+    [your last watched]" row added as #11? It uses no Recombee, no
+    genre filtering — purely semantic plot similarity. Would visually
+    pair well with the existing BYW row but answer a slightly
+    different question.
+
+    My recommendation: add it.
+
+Q3. Cold-bucket cadence
+    Proposed: cold = 24h, dormant = 1 week.
+    "Dormant" defined as: no last_activities movement in 30 days.
+
+    A weekly dormant cadence means a re-engaging user could wait
+    up to 6 days before Reclio notices they're back. Acceptable
+    given /sync/last_activities is one cheap call?
+
+    My recommendation: yes — the user re-engaging will pull /feeds
+    via Chillio, which immediately pumps them back into the hot
+    bucket via the existing record_feed_hit() path.
+
+Q4. v1.5.0 release before v1.5.1?
+    Proposal: ship watch-state alone first, observe in production
+    for ~2 weeks, then ship embeddings.
+
+    My recommendation: yes — watch-state is self-contained and the
+    higher-value piece. Embeddings need a backfill window where
+    the catalog is partially embedded, which is OK to operate but
+    not great to debut on the same release.
+
+
+----------------------------------------------------------------
+APPENDIX A — FILES TOUCHED IN v1.5
+----------------------------------------------------------------
+
+NEW:
+  app/models/watch_attempt.py
+  app/jobs/watch_state.py
+  app/services/embeddings.py            (provider abstraction)
+  app/services/similarity.py            (cosine query)
+  docs/docs/watch-state.md
+  docs/docs/embeddings.md
+
+MODIFIED:
+  app/models/__init__.py               (export WatchAttempt)
+  app/models/user.py                   (timezone, last_activities_snapshot)
+  app/models/content.py                (embedding columns)
+  app/database.py                      (two new migration helpers)
+  app/main.py                          (version bump, /health new check)
+  app/jobs/user_sync.py                (call evaluate_watch_state +
+                                        cheap-poll path via last_activities)
+  app/jobs/content_sync.py             (embed pass after Recombee push)
+  app/services/trakt.py                (get_last_activities + cache it)
+  app/services/recombee.py             (no changes needed —
+                                        add_negative_interaction reused)
+  app/services/llm.py                  (no changes —
+                                        EmbeddingProvider is sibling, not extension)
+  app/services/feed_builder.py         (BYW blend + cold-start vector seed)
+  app/services/activity.py             (add 'dormant' bucket)
+  app/routers/portal.py                (refresh user.timezone on sign-in)
+  app/routers/admin.py                 (new /admin/watch_attempts and
+                                        /admin/similar endpoints)
+
+
+----------------------------------------------------------------
+APPENDIX B — WHY NOT WEBHOOKS?
+----------------------------------------------------------------
+
+We don't get webhooks from Chillio (Chillio talks to Trakt, not us)
+and Trakt itself only offers webhooks to Pro accounts at the
+account-owner level — meaning the user would have to be Trakt Pro
+AND have webhooks pointed at OUR public ingress. Both impractical.
+
+Polling /sync/last_activities is the closest we can get to push
+semantics. ~50ms latency per check, cents-per-month quota cost.
+
+
+----------------------------------------------------------------
+END OF PLAN
+----------------------------------------------------------------

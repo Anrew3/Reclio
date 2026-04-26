@@ -168,9 +168,32 @@ class TraktClient:
         key = f"profile:{_token_key(token)}"
 
         async def _fetch() -> dict:
-            return await self._request("GET", "/users/me", access_token=token)
+            # extended=full returns the user's timezone field, used by
+            # the watch-state machine's sleep heuristic.
+            return await self._request(
+                "GET", "/users/me", access_token=token, params={"extended": "full"},
+            )
 
         return await self._cache.get_or_set(key, _fetch, ttl=3600)
+
+    async def get_last_activities(self, token: str) -> dict:
+        """Cheap "did anything change?" probe.
+
+        Single GET returning one timestamp per category (movies.watched_at,
+        episodes.watched_at, movies.paused_at, etc.). Lets us skip the bulk
+        of a sync tick when nothing relevant has moved since last time.
+
+        Cache TTL is intentionally short (60 s) so a hot user reflects live
+        activity while still de-duping calls within a single sync_one_user
+        pass.
+        """
+        key = f"activities:{_token_key(token)}"
+
+        async def _fetch() -> dict:
+            data = await self._request("GET", "/sync/last_activities", access_token=token)
+            return data or {}
+
+        return await self._cache.get_or_set(key, _fetch, ttl=60)
 
     async def get_watch_history(
         self, token: str, limit: int = 100, page: int = 1, media_type: str | None = None

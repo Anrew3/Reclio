@@ -86,7 +86,14 @@
 
 {% if taste %}
 <section class="ios-card personality-card">
-  <h3 class="title-3">What Reclio thinks about you</h3>
+  <header class="personality-head">
+    <span class="personality-glyph" aria-hidden="true">
+      <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 2l2.4 5.4L20 8l-4 4 1 6-5-3-5 3 1-6L4 8l5.6-.6L12 2z"/>
+      </svg>
+    </span>
+    <h3 class="title-3">What Reclio thinks about you</h3>
+  </header>
   {% if personality_summary %}
     <p class="personality-blurb">"{{ personality_summary }}"</p>
   {% else %}
@@ -94,16 +101,35 @@
   {% endif %}
 
   {% if personality_breakdown %}
-  <div class="taste-section">
-    <p class="subheadline label-secondary">The breakdown</p>
-    <ul class="personality-bars">
+  <div class="taste-section personality-donut-section">
+    <div class="personality-donut-wrap">
+      <svg class="personality-donut" viewBox="0 0 100 100" aria-hidden="true">
+        <!-- Background ring -->
+        <circle cx="50" cy="50" r="42" fill="none"
+                stroke="rgba(120,120,128,0.16)" stroke-width="14" />
+        <!-- Slices -->
+        {% for slice in personality_breakdown %}
+        <circle cx="50" cy="50" r="42" fill="none"
+                stroke="{{ slice.color }}"
+                stroke-width="14"
+                stroke-linecap="butt"
+                stroke-dasharray="{{ slice.arc_len }} {{ slice.gap_len }}"
+                stroke-dashoffset="{{ slice.offset }}"
+                transform="rotate(-90 50 50)"
+                class="personality-donut-slice" />
+        {% endfor %}
+      </svg>
+      <div class="personality-donut-center">
+        <p class="personality-donut-top-name">{{ personality_breakdown[0].name }}</p>
+        <p class="personality-donut-top-pct">{{ personality_breakdown[0].pct }}%</p>
+      </div>
+    </div>
+    <ul class="personality-legend">
       {% for slice in personality_breakdown %}
-      <li class="personality-bar" style="--pct: {{ slice.pct }}%;">
-        <span class="personality-bar-name">{{ slice.name }}</span>
-        <span class="personality-bar-track" aria-hidden="true">
-          <span class="personality-bar-fill"></span>
-        </span>
-        <span class="personality-bar-pct">{{ slice.pct }}%</span>
+      <li class="personality-legend-row">
+        <span class="personality-legend-swatch" style="background: {{ slice.color }};"></span>
+        <span class="personality-legend-name">{{ slice.name }}</span>
+        <span class="personality-legend-pct">{{ slice.pct }}%</span>
       </li>
       {% endfor %}
     </ul>

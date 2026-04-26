@@ -1,8 +1,15 @@
-"""Daily content sync: TMDB → embeddings → ChromaDB + Recombee + catalog table."""
+"""Daily content sync: TMDB → embeddings → ChromaDB + Recombee + catalog table.
+
+v1.5: also persists embedding bytes + dim + model + source_hash to the
+content_catalog row so the new SQLite-backed similarity service can
+do cosine queries without re-embedding. ChromaDB upsert is preserved
+for backward compat.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 from datetime import datetime
 from typing import Any, Iterable
@@ -11,7 +18,7 @@ from sqlalchemy import select
 
 from app.database import session_scope
 from app.models.content import ContentCatalog
-from app.services.embeddings import build_embedding_text, embed_text
+from app.services.embeddings import build_embedding_text, embed_text, get_embeddings_provider
 from app.services.recombee import get_recombee
 from app.services.tmdb import get_tmdb
 from app.services.vector_store import upsert as vs_upsert
@@ -20,6 +27,26 @@ logger = logging.getLogger(__name__)
 
 # Per-run caps to keep the job's wall time bounded on low-traffic deploys
 _MAX_NEW_PER_RUN = 300
+
+
+def _embedding_source_hash(text: str) -> str:
+    """Stable 16-char fingerprint of the embedding input. Lets us skip
+    re-embedding on subsequent passes when the input hasn't changed."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _pack_embedding(vec: list[float]) -> bytes:
+    """Pack a python list[float] into a numpy float32 byte buffer.
+
+    NumPy is a soft dependency: if it's missing we fall back to Python's
+    struct.pack — slightly slower but always available.
+    """
+    try:
+        import numpy as np
+        return np.array(vec, dtype=np.float32).tobytes()
+    except ImportError:
+        import struct
+        return struct.pack(f"<{len(vec)}f", *vec)
 
 
 async def _gather_candidate_items() -> dict[str, dict]:
@@ -104,14 +131,15 @@ async def _sync_item(
         except (ValueError, IndexError):
             year = None
 
-    # Embedding
+    # Embedding (provider follows LLM_PROVIDER automatically)
+    text = build_embedding_text(title, overview, genres, cast, keywords)
+    source_hash = _embedding_source_hash(text)
+    embedding: list[float] = []
     try:
-        text = build_embedding_text(title, overview, genres, cast, keywords)
         embedding = await embed_text(text)
     except Exception as exc:  # noqa: BLE001
         logger.warning("Embedding failed for %s: %s", key, exc)
-        embedding = None
-        text = None
+        embedding = []
 
     metadata = {
         "title": title,
@@ -155,6 +183,16 @@ async def _sync_item(
         recombee_synced=False,  # flipped after batch push succeeds
         last_updated=datetime.utcnow(),
     )
+    # v1.5: also persist embedding to SQLite columns for the new
+    # similarity service. Skip if the embedder returned [] (provider
+    # disabled or transient failure — re-tries next pass).
+    if embedding:
+        provider = get_embeddings_provider()
+        row.embedding = _pack_embedding(embedding)
+        row.embedding_dim = len(embedding)
+        row.embedding_model = provider.name
+        row.embedding_source_hash = source_hash
+        row.embedding_at = datetime.utcnow()
     return row, recombee_props
 
 

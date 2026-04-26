@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import session_scope
 from app.models.taste_cache import TasteCache
 from app.models.user import User
+from app.services.activity import _flatten_activities
 from app.services.recombee import get_recombee
 from app.services.taste_profile import build_taste_profile
 from app.services.trakt import get_trakt
@@ -210,8 +211,14 @@ async def _refresh_managed_list(
         logger.warning("add_to_list %s failed: %s", list_id, exc)
 
 
-async def sync_one_user(user_id: str) -> None:
-    """Full sync for a single user. Concurrent calls for the same user_id serialize."""
+async def sync_one_user(user_id: str, *, force: bool = False) -> None:
+    """Full sync for a single user. Concurrent calls for the same user_id serialize.
+
+    v1.5: starts with a cheap GET /sync/last_activities probe. If
+    nothing relevant has moved since the last successful sync, we
+    skip the rest of the work and return early. Pass `force=True`
+    to bypass the probe (used by manual refresh + onboarding).
+    """
     lock = await _get_user_sync_lock(user_id)
     async with lock:
         logger.info("user_sync: starting for %s", user_id)
@@ -226,6 +233,42 @@ async def sync_one_user(user_id: str) -> None:
                 logger.warning("user_sync: cannot decrypt token for %s", user_id)
                 return
 
+            # ---- Cheap-poll path: fetch /sync/last_activities first ----
+            # If nothing relevant has changed since our last snapshot, we
+            # skip taste rebuild + interaction push + recommendations
+            # entirely. The watch-state evaluator still runs because its
+            # state machine depends on TIME elapsed, not on new activity.
+            from app.services.activity import activities_changed
+            trakt = get_trakt()
+            current_activities: dict = {}
+            try:
+                current_activities = await trakt.get_last_activities(token)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("user_sync: last_activities probe failed for %s: %s", user_id, exc)
+
+            changed_keys = activities_changed(user.last_activities_snapshot, current_activities) \
+                if current_activities else set()
+            heavy_work_needed = bool(changed_keys) or force
+
+            if not heavy_work_needed:
+                logger.info("user_sync: %s — no Trakt activity since last sync, light pass only", user_id)
+                # Still run watch-state (time-based decisions don't need new history)
+                try:
+                    from app.jobs.watch_state import evaluate_watch_state
+                    counts = await evaluate_watch_state(session, user, history_recent=[])
+                    if counts:
+                        logger.info("watch_state: user=%s verdicts=%s", user_id, counts)
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("watch_state: failed for %s: %s", user_id, exc)
+                user.last_seen = datetime.utcnow()
+                if current_activities:
+                    user.last_activities_snapshot = _flatten_activities(current_activities)
+                    user.last_activities_seen_at = datetime.utcnow()
+                await session.commit()
+                logger.info("user_sync: finished (no-op fast path) for %s", user_id)
+                return
+
+            # ---- Full sync ----
             # 1. Build taste profile (uses its own commits internally)
             try:
                 await build_taste_profile(session, user_id, user.trakt_access_token_enc)
@@ -234,6 +277,38 @@ async def sync_one_user(user_id: str) -> None:
 
             last_sync = user.last_history_sync
             new_cutoff = await _push_interactions(user_id, token, last_sync)
+
+            # 1.5. Watch-state machine — turns /sync/playback deltas into
+            #      structured signal (completed / abandoned_sleep /
+            #      abandoned_bounce / abandoned_lost_interest / accidental).
+            #      Pushes Recombee ratings + marks taste cache stale before
+            #      step 2 fetches recommendations, so verdicts land on the
+            #      same tick they're decided.
+            try:
+                from app.jobs.watch_state import evaluate_watch_state
+                # Pull a recent slice of history for the show-level checks
+                # (S1E1 follow-up, lost-interest seasons-watched count).
+                hist_pages = await asyncio.gather(
+                    trakt.get_watch_history(token, limit=200, media_type="movies"),
+                    trakt.get_watch_history(token, limit=200, media_type="shows"),
+                    return_exceptions=True,
+                )
+                history_recent: list[dict] = []
+                for p in hist_pages:
+                    if isinstance(p, list):
+                        history_recent.extend(p)
+                playback_now = []
+                try:
+                    playback_now = await trakt.get_watch_progress(token)
+                except Exception:  # noqa: BLE001
+                    pass
+                ws_counts = await evaluate_watch_state(
+                    session, user, history_recent=history_recent, playback_now=playback_now,
+                )
+                if ws_counts:
+                    logger.info("watch_state: user=%s verdicts=%s", user_id, ws_counts)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("watch_state: failed for %s: %s", user_id, exc)
 
             # 2. Pull recommendations from Recombee — both the headline
             #    "Recommended For You" and the BYW lists. Item-to-item
@@ -277,6 +352,66 @@ async def sync_one_user(user_id: str) -> None:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("user_sync: recombee recs failed for %s: %s", user_id, exc)
 
+            # 2.5. Vector-similarity layer — blend semantic neighbors into
+            #      BYW lists and seed cold-start "Recommended" rows when
+            #      Recombee returned nothing useful (< 12 history items).
+            try:
+                from app.services.similarity import similar_to
+                # Build a watched set so we never recommend something they
+                # already saw via the vector path. (Recombee already does
+                # this server-side for its own results.)
+                watched: set[str] = set()
+                # Cheap reuse: anchor history that's already cached.
+                for h in (history_recent or []):
+                    if h.get("type") == "movie":
+                        m = h.get("movie") or {}
+                        tmdb = (m.get("ids") or {}).get("tmdb")
+                        if tmdb:
+                            watched.add(f"movie_{tmdb}")
+                    elif h.get("type") == "episode":
+                        s = h.get("show") or {}
+                        tmdb = (s.get("ids") or {}).get("tmdb")
+                        if tmdb:
+                            watched.add(f"tv_{tmdb}")
+
+                async def _blend(recs: list[str], anchor: str | None, mt: str) -> list[str]:
+                    if not anchor:
+                        return recs
+                    sim = await similar_to(anchor, k=25, exclude=watched, media_type=mt)
+                    if not sim:
+                        return recs
+                    if not recs:
+                        # Cold-start path: pure vector seed.
+                        return sim
+                    # Blended rank: Recombee items keep their order, then
+                    # vector items fill the tail with dedupe.
+                    seen = set(recs)
+                    blended = list(recs)
+                    for s in sim:
+                        if s not in seen:
+                            blended.append(s)
+                            seen.add(s)
+                    return blended[:50]
+
+                byw_movie_recs = await _blend(byw_movie_recs, byw_movie_anchor, "movie")
+                byw_show_recs = await _blend(byw_show_recs, byw_show_anchor, "tv")
+
+                # Cold-start "Recommended For You": if Recombee gave us
+                # very little, seed from the user's last-watched anchor
+                # via vector similarity. Skip when Recombee had real recs.
+                if len(movie_recs) < 5 and byw_movie_anchor:
+                    seed = await similar_to(byw_movie_anchor, k=30, exclude=watched, media_type="movie")
+                    if seed:
+                        movie_recs = (movie_recs or []) + [s for s in seed if s not in movie_recs]
+                        movie_recs = movie_recs[:50]
+                if len(show_recs) < 5 and byw_show_anchor:
+                    seed = await similar_to(byw_show_anchor, k=30, exclude=watched, media_type="tv")
+                    if seed:
+                        show_recs = (show_recs or []) + [s for s in seed if s not in show_recs]
+                        show_recs = show_recs[:50]
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("user_sync: similarity blend skipped for %s: %s", user_id, exc)
+
             # 3. Push recs to Trakt managed lists
             try:
                 await asyncio.gather(
@@ -291,6 +426,10 @@ async def sync_one_user(user_id: str) -> None:
             user.profile_ready = True
             user.last_history_sync = new_cutoff
             user.last_seen = datetime.utcnow()
+            # Persist the activity snapshot so the next tick can short-circuit.
+            if current_activities:
+                user.last_activities_snapshot = _flatten_activities(current_activities)
+                user.last_activities_seen_at = datetime.utcnow()
             await session.commit()
 
         logger.info("user_sync: finished for %s", user_id)

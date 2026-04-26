@@ -23,7 +23,9 @@ from app.jobs.user_sync import sync_one_user
 from app.models.account import Account
 from app.models.content import ContentCatalog
 from app.models.user import User
+from app.models.watch_attempt import WatchAttempt
 from app.services.recombee import get_recombee
+from app.services.similarity import similar_to
 
 logger = logging.getLogger(__name__)
 
@@ -204,3 +206,90 @@ async def recombee_preview(
         "shows": shows,
         "totals": {"movies": len(movies), "shows": len(shows)},
     }
+
+
+@router.get("/watch_attempts/{user_id}")
+async def watch_attempts(
+    user_id: str = Path(..., min_length=8, max_length=64),
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """v1.5 watch-state inspection.
+
+    Returns every WatchAttempt for the user grouped by status, with
+    counts and the latest attempts inline. Useful for debugging the
+    sleep / bounce / lost_interest verdict logic.
+    """
+    _require_admin(x_admin_token)
+    user_id = _validate_user_id(user_id)
+
+    async with session_scope() as session:
+        result = await session.execute(
+            select(WatchAttempt).where(WatchAttempt.user_id == user_id)
+        )
+        rows = result.scalars().all()
+
+    by_status: dict[str, list[dict]] = {}
+    for r in rows:
+        entry = {
+            "id": r.id,
+            "kind": r.kind,
+            "movie_tmdb_id": r.movie_tmdb_id,
+            "show_tmdb_id": r.show_tmdb_id,
+            "season_number": r.season_number,
+            "episode_number": r.episode_number,
+            "last_progress_pct": round(r.last_progress_pct or 0.0, 1),
+            "last_paused_at_utc": r.last_paused_at_utc.isoformat() if r.last_paused_at_utc else None,
+            "last_paused_local_hour": r.last_paused_local_hour,
+            "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+            "feedback_pushed": r.feedback_pushed,
+            "first_seen_at": r.first_seen_at.isoformat() if r.first_seen_at else None,
+            "trakt_playback_id": r.trakt_playback_id,
+        }
+        by_status.setdefault(r.status, []).append(entry)
+
+    counts = {status: len(entries) for status, entries in by_status.items()}
+    return {
+        "user_id": user_id,
+        "total": len(rows),
+        "counts": counts,
+        "by_status": by_status,
+    }
+
+
+@router.get("/similar/{seed_id}")
+async def admin_similar(
+    seed_id: str = Path(..., min_length=4, max_length=40),
+    k: int = 12,
+    media_type: str | None = None,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """v1.5 vector-similarity sanity check.
+
+    seed_id format: "movie_<tmdb>" or "tv_<tmdb>" (canonical Reclio id).
+    Returns the top-k semantically similar items from the embedding
+    catalog. Empty when embeddings haven't been computed yet (run
+    /admin/sync/content first).
+    """
+    _require_admin(x_admin_token)
+    if not (seed_id.startswith("movie_") or seed_id.startswith("tv_")):
+        raise HTTPException(status_code=400, detail="seed_id must be 'movie_<tmdb>' or 'tv_<tmdb>'")
+    k = max(1, min(50, k))
+    if media_type and media_type not in ("movie", "tv"):
+        raise HTTPException(status_code=400, detail="media_type must be 'movie' or 'tv'")
+
+    results = await similar_to(seed_id, k=k, media_type=media_type)
+
+    # Hydrate with titles from the catalog so the response is readable.
+    titled: list[dict] = []
+    if results:
+        async with session_scope() as session:
+            res = await session.execute(
+                select(ContentCatalog.tmdb_id, ContentCatalog.title, ContentCatalog.year)
+                .where(ContentCatalog.tmdb_id.in_(results))
+            )
+            title_map = {tid: (title, year) for tid, title, year in res.all()}
+        for rid in results:
+            t, y = title_map.get(rid, (None, None))
+            titled.append({"id": rid, "title": t, "year": y})
+
+    return {"seed_id": seed_id, "k": k, "media_type": media_type, "results": titled}

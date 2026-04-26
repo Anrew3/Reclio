@@ -235,6 +235,11 @@ async def auth_callback(
     user.trakt_refresh_token_enc = encrypt(refresh_token)
     user.trakt_token_expiry = datetime.utcnow() + timedelta(seconds=expires_in)
     user.last_seen = datetime.utcnow()
+    # Capture the IANA timezone for the watch-state sleep heuristic.
+    # Trakt returns this on extended=full. Default UTC if missing.
+    profile_tz = (profile or {}).get("timezone")
+    if isinstance(profile_tz, str) and profile_tz.strip():
+        user.timezone = profile_tz.strip()
 
     if is_new:
         # Create the managed lists. Each create is wrapped individually so
@@ -305,11 +310,12 @@ async def auth_callback(
 
     await session.commit()
 
-    # Kick off the initial sync (non-blocking)
+    # Kick off the initial sync (non-blocking). force=True bypasses the
+    # cheap-poll short-circuit so first connect always builds a profile.
     try:
         from app.jobs.user_sync import sync_one_user
 
-        asyncio.create_task(sync_one_user(user.id))
+        asyncio.create_task(sync_one_user(user.id, force=True))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Failed to schedule initial sync: %s", exc)
 
@@ -483,6 +489,18 @@ def _genre_pills(scores: dict | None, media_type: str, limit: int = 5) -> list[d
     return out
 
 
+# Donut chart palette — 6 colors picked to look good in dark mode
+# without two adjacent slices ever clashing. Cycled per slice index.
+_DONUT_COLORS = (
+    "#0a84ff",   # iOS blue
+    "#bf5af2",   # purple
+    "#ff375f",   # pink
+    "#ff9f0a",   # orange
+    "#30d158",   # green
+    "#64d2ff",   # cyan
+)
+
+
 def _personality_breakdown(
     movie_scores: dict | None,
     show_scores: dict | None,
@@ -493,7 +511,9 @@ def _personality_breakdown(
     The taste-cache stores per-media scores already normalized to [0, 1].
     For the dashboard's "personality wheel" we treat both media types
     as one bag (a viewer who loves Sci-Fi movies AND Sci-Fi shows is
-    *very* into sci-fi). Returns top-N genres with %% rounded.
+    *very* into sci-fi). Returns top-N genres with pct + a precomputed
+    SVG-stroke offset used by the donut chart (math done server-side
+    so the template stays declarative).
     """
     bag: dict[str, float] = {}
     for scores, table in ((movie_scores or {}, MOVIE_GENRES),
@@ -512,15 +532,27 @@ def _personality_breakdown(
     top = sorted(bag.items(), key=lambda x: x[1], reverse=True)[:limit]
     total = sum(score for _, score in top) or 1.0
     out: list[dict] = []
-    running = 0
+    running_pct = 0
+    cumulative_offset = 0.0
+    # Donut geometry: radius 42 → circumference ~263.9. The donut SVG
+    # uses stroke-dasharray "len gap" + stroke-dashoffset to draw arcs.
+    circumference = 2 * 3.141592653589793 * 42
     for i, (name, score) in enumerate(top):
         if i == len(top) - 1:
-            # Last bucket gets the remainder so percentages always sum to 100.
-            pct = 100 - running
+            pct = 100 - running_pct
         else:
             pct = max(1, int(round(score / total * 100)))
-            running += pct
-        out.append({"name": name, "pct": pct})
+            running_pct += pct
+        arc_len = circumference * (pct / 100.0)
+        out.append({
+            "name": name,
+            "pct": pct,
+            "color": _DONUT_COLORS[i % len(_DONUT_COLORS)],
+            "arc_len": round(arc_len, 2),
+            "gap_len": round(circumference - arc_len, 2),
+            "offset": round(cumulative_offset, 2),
+        })
+        cumulative_offset -= arc_len  # next slice starts where this one ends
     return out
 
 
@@ -634,7 +666,9 @@ async def dashboard_refresh(
     try:
         from app.jobs.user_sync import sync_one_user
 
-        asyncio.create_task(sync_one_user(user.id))
+        # Manual refresh always forces a full sync, bypassing the
+        # cheap-poll short-circuit — the user explicitly asked for it.
+        asyncio.create_task(sync_one_user(user.id, force=True))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Manual refresh failed to schedule: %s", exc)
 

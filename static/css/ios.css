@@ -232,8 +232,13 @@ p { margin: 0; }
   background: var(--bg-secondary);
   border-radius: var(--radius-card);
   padding: 20px;
-  margin-bottom: 16px;
-  box-shadow: var(--shadow-card);
+  margin-bottom: 14px;
+  /* Layered shadow + 1px hairline border — closer to the depth iOS
+     gets on grouped-list cards in dark mode. */
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.04) inset,
+    0 10px 30px rgba(0, 0, 0, 0.28),
+    0 1px 2px rgba(0, 0, 0, 0.4);
 }
 
 /* ---------- Permissions (connect page) ---------- */
@@ -264,10 +269,21 @@ p { margin: 0; }
   display: flex;
   justify-content: space-between;
   align-items: flex-end;
-  margin-bottom: 24px;
+  margin-bottom: 28px;
 }
 
-.dashboard-header .caption { margin-bottom: 2px; }
+.dashboard-header .caption {
+  margin-bottom: 4px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.dashboard-header h1 {
+  font-size: 28px;
+  letter-spacing: -0.025em;
+}
 
 .member-switch {
   margin-top: 10px;
@@ -290,7 +306,7 @@ p { margin: 0; }
   cursor: pointer;
 }
 
-/* Addon URL card */
+/* Addon URL card — slightly tighter chrome, more iOS Settings vibe */
 
 .url-card { padding-top: 18px; }
 
@@ -299,9 +315,10 @@ p { margin: 0; }
   gap: 10px;
   align-items: stretch;
   background: var(--bg-tertiary);
-  border-radius: 12px;
+  border-radius: 14px;
   padding: 10px 10px 10px 14px;
   margin: 12px 0 10px;
+  border: 0.5px solid var(--separator);
 }
 
 .addon-url {
@@ -446,84 +463,182 @@ p { margin: 0; }
   color: var(--label-tertiary);
 }
 
-/* Personality card (replaces "Your Taste") */
+/* Personality card — iOS Health-style with SVG donut */
+
+.personality-card {
+  background:
+    radial-gradient(ellipse at top right, rgba(191,90,242,0.08), transparent 60%),
+    var(--bg-secondary);
+  padding: 22px;
+}
+
+.personality-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.personality-glyph {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple));
+  color: white;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  box-shadow: 0 2px 8px rgba(10,132,255,0.35);
+}
 
 .personality-card .personality-blurb {
-  font-size: 16px;
+  font-size: 17px;
   font-style: italic;
   color: var(--label-primary);
   line-height: 1.45;
-  margin: 8px 0 4px;
-  letter-spacing: -0.005em;
+  margin: 12px 0 6px;
+  letter-spacing: -0.01em;
 }
 
-.personality-bars {
+.personality-donut-section {
+  display: flex;
+  gap: 18px;
+  align-items: center;
+  padding: 18px 0 6px;
+}
+
+.personality-donut-wrap {
+  position: relative;
+  flex: 0 0 168px;
+  width: 168px;
+  height: 168px;
+}
+
+.personality-donut {
+  width: 100%;
+  height: 100%;
+  filter: drop-shadow(0 4px 12px rgba(0,0,0,0.35));
+}
+
+/* Slice draw-in animation: each slice fades and grows from 0
+   stroke. Staggered via nth-of-type so the wheel "fills" left-to-right. */
+.personality-donut-slice {
+  animation: donut-in 700ms cubic-bezier(0.32, 0.72, 0.27, 1) backwards;
+  transform-origin: 50% 50%;
+}
+.personality-donut-slice:nth-of-type(2) { animation-delay: 80ms; }
+.personality-donut-slice:nth-of-type(3) { animation-delay: 160ms; }
+.personality-donut-slice:nth-of-type(4) { animation-delay: 240ms; }
+.personality-donut-slice:nth-of-type(5) { animation-delay: 320ms; }
+.personality-donut-slice:nth-of-type(6) { animation-delay: 400ms; }
+.personality-donut-slice:nth-of-type(7) { animation-delay: 480ms; }
+
+@keyframes donut-in {
+  from { opacity: 0; transform: scale(0.85); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+.personality-donut-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  text-align: center;
+}
+
+.personality-donut-top-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label-secondary);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  max-width: 100px;
+  line-height: 1.1;
+  margin-bottom: 2px;
+}
+
+.personality-donut-top-pct {
+  font-size: 32px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.personality-legend {
   list-style: none;
-  margin: 6px 0 0;
+  margin: 0;
   padding: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 1;
+  min-width: 0;
 }
 
-.personality-bar {
+.personality-legend-row {
   display: grid;
-  grid-template-columns: 95px 1fr 40px;
+  grid-template-columns: 12px 1fr auto;
   align-items: center;
   gap: 10px;
   font-size: 14px;
 }
 
-.personality-bar-name {
-  color: var(--label-secondary);
+.personality-legend-swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.personality-legend-name {
+  color: var(--label-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.personality-bar-track {
-  display: block;
-  height: 8px;
-  background: var(--bg-tertiary);
-  border-radius: 4px;
-  overflow: hidden;
-  position: relative;
-}
-
-.personality-bar-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: var(--pct, 0%);
-  background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
-  border-radius: 4px;
-  transition: width 600ms cubic-bezier(0.32, 0.72, 0.27, 1);
-}
-
-.personality-bar-pct {
-  font-size: 12px;
+.personality-legend-pct {
+  font-size: 13px;
   font-weight: 600;
   color: var(--label-tertiary);
-  text-align: right;
   font-variant-numeric: tabular-nums;
 }
 
-@media (max-width: 380px) {
-  .personality-bar { grid-template-columns: 80px 1fr 36px; gap: 8px; font-size: 13px; }
+@media (max-width: 460px) {
+  .personality-donut-section {
+    flex-direction: column;
+    gap: 16px;
+    align-items: stretch;
+  }
+  .personality-donut-wrap { align-self: center; flex: 0 0 200px; width: 200px; height: 200px; }
 }
 
-/* Taste card */
+/* Taste / personality card sections share the same internal divider style */
 
-.taste-card .taste-section {
-  padding: 14px 0;
+.taste-card .taste-section,
+.personality-card .taste-section {
+  padding: 16px 0;
   border-top: 0.5px solid var(--separator);
 }
 
-.taste-card .taste-section:first-of-type {
+.taste-card .taste-section:first-of-type,
+.personality-card .taste-section:first-of-type {
   border-top: none;
   padding-top: 16px;
 }
 
-.taste-card .subheadline { margin-bottom: 10px; }
+.taste-card .subheadline,
+.personality-card .subheadline {
+  margin-bottom: 10px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  font-weight: 600;
+}
 
 .pill-row {
   display: flex;

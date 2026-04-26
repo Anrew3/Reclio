@@ -79,7 +79,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Reclio",
     description="ChillLink addon server: Netflix-style personalized recommendations powered by Trakt.",
-    version="1.4.0",
+    version="1.5.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
