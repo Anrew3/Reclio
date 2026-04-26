@@ -208,6 +208,158 @@ async def recombee_preview(
     }
 
 
+@router.get("/recombee/diagnose")
+async def recombee_diagnose(
+    write_test: bool = False,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """End-to-end Recombee health check.
+
+    Returns:
+      - config (DB ID + region setting + whether token is set; token NEVER exposed)
+      - connectivity (can we ListItems? what does Recombee report?)
+      - catalog comparison (Reclio's local count vs Recombee's count)
+      - recent push activity (last 10 catalog rows + their synced flag)
+      - optional write_test (set ?write_test=1 to push + read back a probe item)
+
+    Common diagnoses encoded as `verdict`:
+      - "ok"               every check passed
+      - "wrong_region"     ListItems works but item count is 0 while Reclio
+                           shows recombee_synced rows; almost always means
+                           wrong RECOMBEE_REGION (writes go to a different DB)
+      - "writes_silently_failing"  catalog has items, recombee_synced=true,
+                                   but Recombee returns 0 items — means
+                                   per-item batch errors weren't detected
+      - "no_pushes_yet"    Reclio catalog is empty; content_sync hasn't run
+      - "unreachable"      ListItems failed entirely
+      - "no_credentials"   missing DB ID or token
+    """
+    _require_admin(x_admin_token)
+    recombee = get_recombee()
+    config = recombee.config_dump()
+
+    # 1. Connectivity: can we list anything?
+    rec_count, rec_sample = await recombee.list_items_count(max_count=10)
+    connectivity_ok = rec_count is not None
+
+    # 2. Catalog comparison
+    async with session_scope() as session:
+        catalog_total = await session.scalar(
+            select(func.count()).select_from(ContentCatalog)
+        )
+        catalog_synced = await session.scalar(
+            select(func.count()).select_from(ContentCatalog).where(
+                ContentCatalog.recombee_synced.is_(True)
+            )
+        )
+        # Last 10 rows with their sync state, newest first
+        recent_q = (
+            select(ContentCatalog.tmdb_id, ContentCatalog.title,
+                   ContentCatalog.recombee_synced, ContentCatalog.last_updated)
+            .order_by(ContentCatalog.last_updated.desc().nullslast())
+            .limit(10)
+        )
+        recent_rows = (await session.execute(recent_q)).all()
+        last_push_at = await session.scalar(
+            select(func.max(ContentCatalog.last_updated))
+        )
+
+    recent = [
+        {
+            "tmdb_id": tmdb_id,
+            "title": title,
+            "recombee_synced": bool(synced),
+            "last_updated": last.isoformat() if last else None,
+        }
+        for tmdb_id, title, synced, last in recent_rows
+    ]
+
+    # 3. Optional write+read probe
+    write_probe = None
+    if write_test:
+        ok, err = await recombee.write_test_item()
+        write_probe = {"ok": ok, "error": err}
+
+    # 4. Verdict
+    if not config["token_present"] or not config["database_id"]:
+        verdict = "no_credentials"
+    elif not config["sdk_loaded"]:
+        verdict = "sdk_missing"
+    elif not config["available"]:
+        verdict = "client_init_failed"
+    elif not connectivity_ok:
+        verdict = "unreachable"
+    elif (catalog_total or 0) == 0:
+        verdict = "no_pushes_yet"
+    elif (catalog_synced or 0) > 0 and (rec_count or 0) == 0:
+        # Most damning: we *think* we pushed N items but Recombee shows 0.
+        # Almost always wrong region or wrong DB.
+        verdict = "wrong_region"
+    elif (catalog_synced or 0) > 10 and (rec_count or 0) < (catalog_synced or 0) // 4:
+        verdict = "writes_silently_failing"
+    else:
+        verdict = "ok"
+
+    return {
+        "verdict": verdict,
+        "config": config,
+        "connectivity": {
+            "list_items_ok": connectivity_ok,
+            "recombee_returned_count": rec_count,
+            "sample_ids": rec_sample,
+        },
+        "catalog": {
+            "total_in_reclio": catalog_total or 0,
+            "marked_synced_locally": catalog_synced or 0,
+            "last_local_push_at": last_push_at.isoformat() if last_push_at else None,
+            "recent": recent,
+        },
+        "write_probe": write_probe,
+        "next_steps": _diagnose_next_steps(verdict),
+    }
+
+
+def _diagnose_next_steps(verdict: str) -> list[str]:
+    """Plain-English remediation steps per verdict."""
+    return {
+        "ok": [
+            "Recombee is receiving and serving data correctly.",
+            "If the web UI still looks empty, double-check you're logged into the same database ID this Reclio instance is configured with.",
+        ],
+        "no_credentials": [
+            "Set RECOMBEE_DATABASE_ID and RECOMBEE_PRIVATE_TOKEN in your environment, then restart the container.",
+        ],
+        "sdk_missing": [
+            "The recombee-api-client package isn't installed. Rebuild the container.",
+        ],
+        "client_init_failed": [
+            "Credentials are present but the SDK couldn't construct a client. Check container logs around startup.",
+        ],
+        "unreachable": [
+            "ListItems failed — Recombee is rejecting our requests.",
+            "Verify RECOMBEE_DATABASE_ID matches the database you see in the web UI.",
+            "Verify RECOMBEE_PRIVATE_TOKEN is the *private* token, not the public one.",
+            "Check container logs for 'Recombee request failed' DEBUG lines (set LOG_LEVEL=DEBUG temporarily).",
+        ],
+        "no_pushes_yet": [
+            "Reclio's local catalog is empty — content_sync hasn't run yet.",
+            "Trigger it now: POST /admin/sync/content (with X-Admin-Token).",
+            "First run can take 2-3 minutes to fetch ~300 items from TMDB and push to Recombee.",
+        ],
+        "wrong_region": [
+            "Reclio thinks it pushed items but Recombee shows zero.",
+            "MOST LIKELY CAUSE: RECOMBEE_REGION is wrong (writes are going to a different region's database).",
+            "Check the URL in the Recombee web UI — it usually contains the region (e.g. https://rapi-eu-west.recombee.com).",
+            "Match RECOMBEE_REGION to one of: US_WEST, EU_WEST, AP_SE, CA_EAST. Restart container after changing.",
+        ],
+        "writes_silently_failing": [
+            "Some pushes succeeded but most are failing silently.",
+            "Try ?write_test=1 on this endpoint to attempt a single write+read probe.",
+            "Check container logs for 'Recombee request failed' (set LOG_LEVEL=DEBUG temporarily).",
+        ],
+    }.get(verdict, ["Unknown verdict — please share this response."])
+
+
 @router.get("/watch_attempts/{user_id}")
 async def watch_attempts(
     user_id: str = Path(..., min_length=8, max_length=64),

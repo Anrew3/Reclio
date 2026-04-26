@@ -398,6 +398,89 @@ class RecombeeService:
         except Exception as exc:  # noqa: BLE001
             logger.debug("Recombee AddRating(-1) failed: %s", exc)
 
+    async def list_items_count(self, max_count: int = 5) -> tuple[int | None, list[str]]:
+        """Probe ListItems for diagnostics.
+
+        Returns (count_or_None, sample_ids). count is None when the SDK
+        request failed (Recombee unreachable, bad creds, wrong region).
+        Use as a one-call "is Recombee actually receiving our writes?" probe.
+        """
+        if not self._client:
+            return None, []
+        rq = self._rq
+        try:
+            result = await asyncio.to_thread(
+                self._client.send,
+                rq.ListItems(count=max_count, return_properties=False),
+            )
+            if isinstance(result, list):
+                return len(result), [str(x) for x in result[:max_count]]
+            if isinstance(result, dict):
+                items = result.get("items") or result.get("ids") or []
+                return len(items), [str(i.get("itemId") if isinstance(i, dict) else i)
+                                    for i in items[:max_count]]
+            return 0, []
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Recombee ListItems failed: %s", exc)
+            return None, []
+
+    async def get_item(self, item_id: str) -> dict | None:
+        """Fetch a specific item's properties — used as a write-verify probe."""
+        if not self._client:
+            return None
+        rq = self._rq
+        try:
+            return await asyncio.to_thread(
+                self._client.send,
+                rq.GetItemValues(item_id),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Recombee GetItemValues(%s) failed: %s", item_id, exc)
+            return None
+
+    async def write_test_item(self) -> tuple[bool, str | None]:
+        """Try to write a tiny test item, then read it back.
+
+        Returns (success, error_message). Use to confirm the
+        write+read path works against the configured database.
+        """
+        if not self._client:
+            return False, "Recombee client unavailable (DB ID / token / SDK missing)"
+        rq = self._rq
+        test_id = "reclio_health_probe"
+        try:
+            await asyncio.to_thread(
+                self._client.send,
+                rq.SetItemValues(
+                    test_id,
+                    {"title": "Reclio Health Probe", "media_type": "movie"},
+                    cascade_create=True,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            return False, f"write failed: {exc}"
+        try:
+            result = await asyncio.to_thread(
+                self._client.send, rq.GetItemValues(test_id),
+            )
+            if not result:
+                return False, "wrote item but read-back returned empty"
+            return True, None
+        except Exception as exc:  # noqa: BLE001
+            return False, f"read-back failed: {exc}"
+
+    def config_dump(self) -> dict[str, Any]:
+        """Non-sensitive config snapshot for diagnostics. Token NEVER included."""
+        settings = get_settings()
+        return {
+            "available": self.available,
+            "database_id": self.database_id,
+            "region_setting": settings.recombee_region,
+            "token_present": bool(self.private_token),
+            "token_length": len(self.private_token) if self.private_token else 0,
+            "sdk_loaded": self._rq is not None,
+        }
+
     async def recommend_items_to_item(
         self,
         item_id: str,
