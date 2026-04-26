@@ -446,6 +446,71 @@ p { margin: 0; }
   color: var(--label-tertiary);
 }
 
+/* Personality card (replaces "Your Taste") */
+
+.personality-card .personality-blurb {
+  font-size: 16px;
+  font-style: italic;
+  color: var(--label-primary);
+  line-height: 1.45;
+  margin: 8px 0 4px;
+  letter-spacing: -0.005em;
+}
+
+.personality-bars {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.personality-bar {
+  display: grid;
+  grid-template-columns: 95px 1fr 40px;
+  align-items: center;
+  gap: 10px;
+  font-size: 14px;
+}
+
+.personality-bar-name {
+  color: var(--label-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.personality-bar-track {
+  display: block;
+  height: 8px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+.personality-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--pct, 0%);
+  background: linear-gradient(90deg, var(--accent-blue), var(--accent-purple));
+  border-radius: 4px;
+  transition: width 600ms cubic-bezier(0.32, 0.72, 0.27, 1);
+}
+
+.personality-bar-pct {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label-tertiary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 380px) {
+  .personality-bar { grid-template-columns: 80px 1fr 36px; gap: 8px; font-size: 13px; }
+}
+
 /* Taste card */
 
 .taste-card .taste-section {
@@ -962,6 +1027,107 @@ p { margin: 0; }
   padding: 6px 12px;
   letter-spacing: 0.01em;
 }
+
+/* Interactive dislike card */
+
+.dislike-card {
+  align-self: stretch;
+  background: var(--bg-tertiary);
+  border-radius: 14px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  animation: fade-in 200ms ease-out;
+}
+
+.dislike-card-row {
+  display: flex;
+  gap: 12px;
+}
+
+.dislike-poster {
+  flex: 0 0 70px;
+  width: 70px;
+  height: 105px;
+  border-radius: 8px;
+  object-fit: cover;
+  background: var(--bg-quaternary);
+}
+
+.dislike-poster-fallback {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32px;
+  color: var(--label-tertiary);
+}
+
+.dislike-meta { flex: 1; min-width: 0; }
+
+.dislike-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  line-height: 1.25;
+}
+
+.dislike-year {
+  font-weight: 400;
+  color: var(--label-tertiary);
+  font-size: 13px;
+}
+
+.dislike-overview {
+  font-size: 12px;
+  color: var(--label-secondary);
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.dislike-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+}
+
+.dislike-reason {
+  background: var(--bg-secondary);
+  color: var(--label-primary);
+  border: 1px solid var(--separator);
+  border-radius: 10px;
+  padding: 9px 12px;
+  font-size: 14px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 120ms ease;
+}
+
+.dislike-reason:focus { border-color: var(--accent-red); }
+
+.dislike-actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
+}
+
+.dislike-save {
+  background: rgba(255, 69, 58, 0.18);
+  color: var(--accent-red);
+  padding: 6px 14px;
+  min-height: 34px;
+  font-size: 14px;
+}
+
+.dislike-save:hover { background: rgba(255, 69, 58, 0.28); }
+.dislike-save:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.dislike-cancel { font-size: 13px; }
 
 .chat-input-row {
   display: flex;

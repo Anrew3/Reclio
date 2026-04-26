@@ -345,6 +345,67 @@ class LLMService:
         self._cache.set(key, cleaned)
         return cleaned
 
+    async def generate_personality_summary(
+        self,
+        *,
+        top_movie_genres: list[str],
+        top_show_genres: list[str],
+        top_actors: list[str],
+        preferred_decade: int | None,
+        total_movies: int,
+        total_shows: int,
+    ) -> str | None:
+        """Write a 1-2 sentence playful "personality" blurb for the
+        dashboard. Slightly teasing, never mean. Returns None if the
+        provider is unavailable so the dashboard can hide the line.
+        """
+        if not self.enabled:
+            return None
+        bits: list[str] = []
+        if top_movie_genres:
+            bits.append("favorite movie genres: " + ", ".join(
+                sanitize_for_prompt(g, 40) for g in top_movie_genres[:4]
+            ))
+        if top_show_genres:
+            bits.append("favorite TV genres: " + ", ".join(
+                sanitize_for_prompt(g, 40) for g in top_show_genres[:4]
+            ))
+        if top_actors:
+            bits.append("recurring actors: " + ", ".join(
+                sanitize_for_prompt(a, 60) for a in top_actors[:3]
+            ))
+        if preferred_decade:
+            bits.append(f"era sweet-spot: {preferred_decade}s")
+        bits.append(f"watch volume: {total_movies} films + {total_shows} shows logged")
+
+        if not bits:
+            return None
+
+        prompt = (
+            "You write playful 1-2 sentence personality blurbs for a movie\n"
+            "recommendation app's home screen. Tone: warm but lightly teasing,\n"
+            "like a friend roasting your watchlist. Reference specifics from\n"
+            "their data. Examples of voice (DO NOT copy exactly):\n"
+            "  - 'You're 60% prestige drama, 40% feel-good action when nobody's looking. Tasteful but tired.'\n"
+            "  - 'A confirmed sci-fi nerd with a shamefully strong romcom side. We see you.'\n"
+            "  - 'Lives for slow burns and Brad Pitt. The 90s called — they want their VHS back.'\n"
+            "Strict rules:\n"
+            "  - 1-2 sentences total, max 200 chars.\n"
+            "  - No emojis. No quotes around the output.\n"
+            "  - Never accuse them of bad taste — affectionate jab only.\n"
+            "  - Don't list every genre robotically; pick the most personality-revealing details.\n\n"
+            "Viewer signals:\n  " + "\n  ".join(bits) + "\n\n"
+            "Personality blurb:"
+        )
+        result = await self.provider.generate(prompt, max_tokens=120, temperature=0.85)
+        if not result:
+            return None
+        cleaned = result.strip().strip('"').strip("'")
+        # First paragraph only — guard against models returning a list.
+        cleaned = cleaned.split("\n\n", 1)[0].strip()
+        cleaned = cleaned.split("\n", 1)[0].strip() if "\n" in cleaned else cleaned
+        return cleaned[:240] if cleaned else None
+
     async def classify_chat_intent(
         self,
         question: str,
@@ -401,8 +462,12 @@ class LLMService:
             "You are Reclio's chat backend. Classify the viewer's message and\n"
             "respond with ONE JSON object — no prose, no markdown fence — matching:\n"
             '{\n'
-            '  "intent": "mutate" | "explain" | "general",\n'
+            '  "intent": "dislike_request" | "mutate" | "explain" | "general",\n'
             '  "answer": "string, max 280 chars",\n'
+            '  "dislike": {                             // include only when intent==dislike_request\n'
+            '     "title": "the specific title the user named",\n'
+            '     "kind": "movie" | "tv"\n'
+            '  },\n'
             '  "mutations": {                          // include only when intent==mutate\n'
             '     "delta_era": int -50..50,            // negative = older, positive = newer\n'
             '     "delta_pacing": int -50..50,         // negative = slower, positive = more action\n'
@@ -416,13 +481,18 @@ class LLMService:
             '  }\n'
             '}\n\n'
             "Rules:\n"
-            "- intent=mutate when the message asks to change recommendations\n"
-            "  ('stop showing me X', 'I want more X', 'newer movies please',\n"
-            "  'never recommend Inception again', 'less action').\n"
-            "- intent=explain when the message asks WHY something appears\n"
-            "  ('why do I keep seeing X', 'what makes you think I want this').\n"
-            "- intent=general for anything else (recommendations, chitchat).\n"
-            "- For mutate: ONLY include delta/list keys you actually changed. Use 0 / [] for unused.\n"
+            "- intent=dislike_request when the user names ONE specific title\n"
+            "  they want gone ('I hated Inception', 'never show me Friends',\n"
+            "  'I dislike The Office'). The follow-up flow asks them why.\n"
+            "  The 'answer' field for dislike_request should be a short\n"
+            "  conversational ack like 'Got it, let me find that.' — the\n"
+            "  client renders the poster card next.\n"
+            "- intent=mutate for category-level changes ('stop showing me\n"
+            "  horror', 'newer movies', 'less action').\n"
+            "- intent=explain when the message asks WHY ('why do I keep\n"
+            "  seeing X', 'what makes you think I want this').\n"
+            "- intent=general for anything else.\n"
+            "- For mutate: ONLY include delta/list keys you actually changed.\n"
             "- For explain: ground the answer in the viewer's recent watches "
             f"({watched_ctx}) and avoid hedging.\n"
             "- Keep answer under 280 chars. Be warm and direct.\n"
@@ -452,9 +522,21 @@ class LLMService:
             return None
 
         intent = parsed.get("intent")
-        if intent not in ("mutate", "explain", "general"):
+        if intent not in ("dislike_request", "mutate", "explain", "general"):
             intent = "general"
         answer = str(parsed.get("answer") or "").strip()[:320]
+
+        dislike: dict[str, Any] = {}
+        if intent == "dislike_request":
+            raw_d = parsed.get("dislike") or {}
+            t = sanitize_for_prompt(raw_d.get("title") or "", 120).strip()
+            k = raw_d.get("kind") if raw_d.get("kind") in ("movie", "tv") else "movie"
+            if t:
+                dislike = {"title": t, "kind": k}
+            else:
+                # Couldn't extract a title — downgrade to general so the
+                # caller doesn't show an empty "is this it?" card.
+                intent = "general"
 
         mutations: dict[str, Any] = {}
         if intent == "mutate":
@@ -518,6 +600,7 @@ class LLMService:
             "intent": intent,
             "answer": answer or None,
             "mutations": mutations,
+            "dislike": dislike,
         }
 
     async def derive_preferences(

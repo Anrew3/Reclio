@@ -71,6 +71,19 @@ async def _migrate_add_user_account_columns(conn) -> None:
         logger.info("migration: added users.trakt_byw_shows_list_id column")
 
 
+async def _migrate_add_taste_cache_columns(conn) -> None:
+    """Add v1.4 personality_summary to existing taste_cache tables."""
+    rows = await conn.execute(text("PRAGMA table_info(taste_cache)"))
+    existing_cols = {row[1] for row in rows.fetchall()}
+    if not existing_cols:
+        return
+    if "personality_summary" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE taste_cache ADD COLUMN personality_summary VARCHAR")
+        )
+        logger.info("migration: added taste_cache.personality_summary column")
+
+
 async def _migrate_add_preference_columns(conn) -> None:
     """Add `onboarding_answers` + `vibe_summary` to existing user_preferences.
 
@@ -160,6 +173,7 @@ async def init_db() -> None:
     async with engine.begin() as conn:
         await _migrate_add_user_account_columns(conn)
         await _migrate_add_preference_columns(conn)
+        await _migrate_add_taste_cache_columns(conn)
         await conn.run_sync(Base.metadata.create_all)
 
     await _backfill_accounts_for_orphan_users()

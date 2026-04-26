@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any
@@ -11,11 +12,17 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.taste_cache import TasteCache
-from app.services.tmdb import get_tmdb
+from app.services.llm import get_llm
+from app.services.tmdb import MOVIE_GENRES, TV_GENRES, get_tmdb
 from app.services.trakt import get_trakt
 from app.utils.crypto import decrypt
 
 logger = logging.getLogger(__name__)
+
+# Recency-decay half-life: a watch this old contributes half as much as
+# a watch right now. 730 days = 2 years. Older ratings still matter, but
+# fresh signal dominates — matches the intuition that taste shifts.
+_RECENCY_HALF_LIFE_DAYS = 730.0
 
 
 def _rating_to_weight(rating: int | float) -> float:
@@ -30,6 +37,25 @@ def _rating_to_weight(rating: int | float) -> float:
     if r >= 5:
         return (r - 5) / 5.0  # 5→0, 10→1
     return (r - 5) / 8.0  # 1→-0.5, 5→0
+
+
+def _recency_decay(iso_ts: str | None, *, half_life_days: float = _RECENCY_HALF_LIFE_DAYS) -> float:
+    """Multiplier in (0, 1] based on how long ago the event happened.
+
+    Returns 1.0 for "right now" and decays exponentially. Falls back to
+    1.0 (no decay) when the timestamp is missing or unparseable — better
+    to keep the signal at full weight than drop it.
+    """
+    if not iso_ts:
+        return 1.0
+    try:
+        ts = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return 1.0
+    now = datetime.now(ts.tzinfo) if ts.tzinfo else datetime.utcnow()
+    age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
+    # 2 ** (-age / half_life) → 1.0 at age 0, 0.5 at half_life
+    return math.pow(2.0, -age_days / half_life_days)
 
 
 def _normalize_scores(raw: dict[int, float]) -> dict[str, float]:
@@ -134,7 +160,10 @@ async def build_taste_profile(
         rating = rating_item.get("rating")
         if not tmdb_id:
             return
-        weight = _rating_to_weight(rating)
+        # weight = sentiment × recency. Old 10/10 ratings still count
+        # but fresh signal dominates the profile.
+        decay = _recency_decay(rating_item.get("rated_at"))
+        weight = _rating_to_weight(rating) * decay
         genres, cast, director, year = await _fetch_tmdb_genres_for("movie", tmdb_id)
         for g in genres:
             gid = g.get("id")
@@ -156,7 +185,8 @@ async def build_taste_profile(
         rating = rating_item.get("rating")
         if not tmdb_id:
             return
-        weight = _rating_to_weight(rating)
+        decay = _recency_decay(rating_item.get("rated_at"))
+        weight = _rating_to_weight(rating) * decay
         genres, cast, _director, year = await _fetch_tmdb_genres_for("tv", tmdb_id)
         for g in genres:
             gid = g.get("id")
@@ -183,18 +213,21 @@ async def build_taste_profile(
         return_exceptions=True,
     )
 
-    # Augment with history if ratings are sparse
+    # Augment with history if ratings are sparse. History items get a
+    # smaller base weight (0.3 vs ratings' [-0.5, 1.0] range) but still
+    # respect recency — last week's watches matter much more than 2016's.
     if not movie_items:
         for h in movie_history[:40]:
             movie = h.get("movie") or {}
             tmdb_id = (movie.get("ids") or {}).get("tmdb")
             if not tmdb_id:
                 continue
+            base = 0.3 * _recency_decay(h.get("watched_at"))
             genres, _cast, _director, year = await _fetch_tmdb_genres_for("movie", tmdb_id)
             for g in genres:
                 gid = g.get("id")
                 if gid is not None:
-                    movie_genre_raw[gid] += 0.3
+                    movie_genre_raw[gid] += base
                     movie_genre_counts[gid] += 1
             if year:
                 decade_counter[(year // 10) * 10] += 1
@@ -205,11 +238,12 @@ async def build_taste_profile(
             tmdb_id = (show.get("ids") or {}).get("tmdb")
             if not tmdb_id:
                 continue
+            base = 0.3 * _recency_decay(h.get("watched_at"))
             genres, _cast, _director, year = await _fetch_tmdb_genres_for("tv", tmdb_id)
             for g in genres:
                 gid = g.get("id")
                 if gid is not None:
-                    show_genre_raw[gid] += 0.3
+                    show_genre_raw[gid] += base
                     show_genre_counts[gid] += 1
             if year:
                 decade_counter[(year // 10) * 10] += 1
@@ -264,6 +298,35 @@ async def build_taste_profile(
     cache.total_shows_watched = len(show_history)
     cache.computed_at = datetime.utcnow()
     cache.is_stale = False
+
+    # Personality blurb — best-effort, never blocks the sync. Skips
+    # entirely if the LLM is disabled (NullProvider).
+    try:
+        llm = get_llm()
+        if llm.enabled:
+            top_movie_names = [
+                MOVIE_GENRES.get(int(gid), "")
+                for gid, _ in sorted(movie_scores.items(), key=lambda x: x[1], reverse=True)[:5]
+                if MOVIE_GENRES.get(int(gid))
+            ]
+            top_show_names = [
+                TV_GENRES.get(int(gid), "")
+                for gid, _ in sorted(show_scores.items(), key=lambda x: x[1], reverse=True)[:5]
+                if TV_GENRES.get(int(gid))
+            ]
+            actor_names = [a["name"] for a in top_actors if a.get("name")]
+            blurb = await llm.generate_personality_summary(
+                top_movie_genres=top_movie_names,
+                top_show_genres=top_show_names,
+                top_actors=actor_names,
+                preferred_decade=preferred_decade,
+                total_movies=len(movie_history),
+                total_shows=len(show_history),
+            )
+            if blurb:
+                cache.personality_summary = blurb
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("personality summary generation skipped: %s", exc)
 
     await session.commit()
     return cache

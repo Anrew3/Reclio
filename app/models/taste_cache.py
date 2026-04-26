@@ -29,5 +29,11 @@ class TasteCache(Base):
     total_movies_watched: Mapped[int] = mapped_column(Integer, default=0)
     total_shows_watched: Mapped[int] = mapped_column(Integer, default=0)
 
+    # LLM-written 1-2 sentence "personality blurb" — slightly teasing,
+    # rendered above the genre-breakdown bars in the dashboard's
+    # "What Reclio thinks about you" card. NULL until first sync after
+    # an LLM provider is configured.
+    personality_summary: Mapped[str | None] = mapped_column(String, nullable=True)
+
     computed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_stale: Mapped[bool] = mapped_column(Boolean, default=True)

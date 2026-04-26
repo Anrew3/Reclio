@@ -210,6 +210,31 @@ class TMDBClient:
         """Person details (used for actor headshots on the dashboard)."""
         return await self._get(f"/person/{tmdb_person_id}")
 
+    async def search_movie(self, query: str, limit: int = 1) -> list[dict]:
+        """Title search for movies — used by the dislike chat flow to
+        resolve a user-typed title to a poster + tmdb_id. Returns up to
+        `limit` results (default 1, since we usually want the top match).
+        """
+        if not query.strip():
+            return []
+        data = await self._get(
+            "/search/movie",
+            params={"query": query.strip(), "include_adult": "false"},
+        )
+        results = (data or {}).get("results", []) or []
+        return results[:limit]
+
+    async def search_tv(self, query: str, limit: int = 1) -> list[dict]:
+        """Title search for shows. Mirrors search_movie."""
+        if not query.strip():
+            return []
+        data = await self._get(
+            "/search/tv",
+            params={"query": query.strip(), "include_adult": "false"},
+        )
+        results = (data or {}).get("results", []) or []
+        return results[:limit]
+
 
 def _parse_params(parameters: str) -> dict[str, str]:
     """Convert a '&' joined query string into a dict."""

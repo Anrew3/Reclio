@@ -85,34 +85,34 @@
 {% endif %}
 
 {% if taste %}
-<section class="ios-card taste-card">
-  <h3 class="title-3">Your Taste</h3>
-
-  {% if movie_genres %}
-  <div class="taste-section">
-    <p class="subheadline label-secondary">Top movie genres</p>
-    <div class="pill-row">
-      {% for g in movie_genres %}
-        <span class="genre-pill {% if loop.index == 1 %}top{% endif %}">{{ g.name }}</span>
-      {% endfor %}
-    </div>
-  </div>
+<section class="ios-card personality-card">
+  <h3 class="title-3">What Reclio thinks about you</h3>
+  {% if personality_summary %}
+    <p class="personality-blurb">"{{ personality_summary }}"</p>
+  {% else %}
+    <p class="callout">Building your personality… check back after the next sync.</p>
   {% endif %}
 
-  {% if show_genres %}
+  {% if personality_breakdown %}
   <div class="taste-section">
-    <p class="subheadline label-secondary">Top show genres</p>
-    <div class="pill-row">
-      {% for g in show_genres %}
-        <span class="genre-pill {% if loop.index == 1 %}top{% endif %}">{{ g.name }}</span>
+    <p class="subheadline label-secondary">The breakdown</p>
+    <ul class="personality-bars">
+      {% for slice in personality_breakdown %}
+      <li class="personality-bar" style="--pct: {{ slice.pct }}%;">
+        <span class="personality-bar-name">{{ slice.name }}</span>
+        <span class="personality-bar-track" aria-hidden="true">
+          <span class="personality-bar-fill"></span>
+        </span>
+        <span class="personality-bar-pct">{{ slice.pct }}%</span>
+      </li>
       {% endfor %}
-    </div>
+    </ul>
   </div>
   {% endif %}
 
   {% if top_actors %}
   <div class="taste-section">
-    <p class="subheadline label-secondary">Top actors</p>
+    <p class="subheadline label-secondary">Recurring faces</p>
     <div class="actor-list">
       {% for actor in top_actors %}
       <div class="actor-chip">
@@ -133,19 +133,19 @@
 
   {% if preferred_decade %}
   <div class="taste-section decade-section">
-    <p class="subheadline label-secondary">Era preference</p>
-    <p class="title-3">You love {{ preferred_decade }}s films</p>
+    <p class="subheadline label-secondary">Era sweet-spot</p>
+    <p class="title-3">{{ preferred_decade }}s</p>
   </div>
   {% endif %}
 
   <div class="taste-stats">
     <div class="stat">
       <p class="stat-value">{{ total_movies }}</p>
-      <p class="stat-label">movies watched</p>
+      <p class="stat-label">movies logged</p>
     </div>
     <div class="stat">
       <p class="stat-value">{{ total_shows }}</p>
-      <p class="stat-label">shows watched</p>
+      <p class="stat-label">shows logged</p>
     </div>
   </div>
 </section>
@@ -252,6 +252,70 @@
     thread.scrollTop = thread.scrollHeight;
   }
 
+  function appendDislikeCard(p){
+    // Step 2 of the dislike flow: render poster + reason input.
+    const card = document.createElement('div');
+    card.className = 'dislike-card';
+    const yearTxt = p.year ? ' <span class="dislike-year">(' + p.year + ')</span>' : '';
+    card.innerHTML =
+      '<div class="dislike-card-row">' +
+        (p.poster_url
+          ? '<img class="dislike-poster" src="' + p.poster_url + '" alt="" />'
+          : '<div class="dislike-poster dislike-poster-fallback">?</div>') +
+        '<div class="dislike-meta">' +
+          '<p class="dislike-title">' + (p.title || '') + yearTxt + '</p>' +
+          '<p class="dislike-overview"></p>' +
+        '</div>' +
+      '</div>' +
+      '<form class="dislike-form" novalidate>' +
+        '<input type="text" class="dislike-reason" placeholder="What didn’t you like? (optional)" maxlength="200" />' +
+        '<div class="dislike-actions">' +
+          '<button type="button" class="btn-link dislike-cancel">Cancel</button>' +
+          '<button type="submit" class="btn btn-secondary dislike-save">Block it</button>' +
+        '</div>' +
+      '</form>';
+    // textContent for overview to escape
+    card.querySelector('.dislike-overview').textContent = p.overview || '';
+    thread.appendChild(card);
+    thread.scrollTop = thread.scrollHeight;
+
+    const form = card.querySelector('.dislike-form');
+    const reasonInput = card.querySelector('.dislike-reason');
+    const cancelBtn = card.querySelector('.dislike-cancel');
+    cancelBtn.addEventListener('click', function(){ card.remove(); });
+    form.addEventListener('submit', async function(ev){
+      ev.preventDefault();
+      const reason = reasonInput.value.trim();
+      const saveBtn = card.querySelector('.dislike-save');
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      try {
+        const resp = await fetch('/ask/dislike-confirm', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            tmdb_id: p.tmdb_id,
+            kind: p.kind,
+            title: p.title,
+            year: p.year,
+            reason: reason
+          }),
+        });
+        const data = await resp.json();
+        card.remove();
+        if (data.answer) appendBubble('reclio', data.answer);
+        if (data.applied && data.applied.length) {
+          appendBubble('applied', '✓ ' + data.applied.join(', '));
+        }
+        if (data.error) appendBubble('error', data.error);
+      } catch(e) {
+        appendBubble('error', 'Network error. Try again.');
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Block it';
+      }
+    });
+  }
+
   if (fab) fab.addEventListener('click', openPanel);
   if (closeBtn) closeBtn.addEventListener('click', closePanel);
   if (backdrop) backdrop.addEventListener('click', closePanel);
@@ -281,7 +345,10 @@
           body: JSON.stringify({question: q}),
         });
         const data = await resp.json();
-        if (data.answer) {
+        if (data.intent === 'dislike_pending' && data.pending) {
+          if (data.answer) appendBubble('reclio', data.answer);
+          appendDislikeCard(data.pending);
+        } else if (data.answer) {
           appendBubble('reclio', data.answer);
           if (data.applied && data.applied.length) {
             appendBubble('applied', '✓ Updated preferences: ' + data.applied.join(', '));

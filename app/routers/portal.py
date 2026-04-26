@@ -483,6 +483,47 @@ def _genre_pills(scores: dict | None, media_type: str, limit: int = 5) -> list[d
     return out
 
 
+def _personality_breakdown(
+    movie_scores: dict | None,
+    show_scores: dict | None,
+    limit: int = 6,
+) -> list[dict]:
+    """Combined movie+show genre breakdown as percentages summing to 100.
+
+    The taste-cache stores per-media scores already normalized to [0, 1].
+    For the dashboard's "personality wheel" we treat both media types
+    as one bag (a viewer who loves Sci-Fi movies AND Sci-Fi shows is
+    *very* into sci-fi). Returns top-N genres with %% rounded.
+    """
+    bag: dict[str, float] = {}
+    for scores, table in ((movie_scores or {}, MOVIE_GENRES),
+                          (show_scores or {}, TV_GENRES)):
+        for gid, score in scores.items():
+            try:
+                gid_int = int(gid)
+            except (TypeError, ValueError):
+                continue
+            name = table.get(gid_int)
+            if not name:
+                continue
+            bag[name] = bag.get(name, 0.0) + float(score)
+    if not bag:
+        return []
+    top = sorted(bag.items(), key=lambda x: x[1], reverse=True)[:limit]
+    total = sum(score for _, score in top) or 1.0
+    out: list[dict] = []
+    running = 0
+    for i, (name, score) in enumerate(top):
+        if i == len(top) - 1:
+            # Last bucket gets the remainder so percentages always sum to 100.
+            pct = 100 - running
+        else:
+            pct = max(1, int(round(score / total * 100)))
+            running += pct
+        out.append({"name": name, "pct": pct})
+    return out
+
+
 @router.get("/dashboard", response_class=HTMLResponse)
 async def dashboard(
     request: Request,
@@ -542,6 +583,11 @@ async def dashboard(
         logger.debug("dashboard: actor headshots failed for %s: %s", user.id, exc)
         top_actors = raw_actors
 
+    personality = _personality_breakdown(
+        taste.movie_genre_scores if taste else None,
+        taste.show_genre_scores if taste else None,
+    )
+
     ctx = {
         "request": request,
         "settings": settings,
@@ -551,6 +597,8 @@ async def dashboard(
         "taste": taste,
         "addon_url": addon_url,
         "recently_watched": recently_watched,
+        "personality_breakdown": personality,
+        "personality_summary": (taste.personality_summary if taste else None),
         "movie_genres": _genre_pills(taste.movie_genre_scores if taste else None, "movies") if taste else [],
         "show_genres": _genre_pills(taste.show_genre_scores if taste else None, "shows") if taste else [],
         "top_actors": top_actors,

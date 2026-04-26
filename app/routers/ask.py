@@ -34,7 +34,9 @@ from app.routers.onboarding import MOODS as MOOD_PALETTE
 from app.routers.portal import _current_account_id, _recently_watched, _resolve_active_user
 from app.services.llm import get_llm
 from app.services.recombee import get_recombee
-from app.services.tmdb import MOVIE_GENRES, TV_GENRES
+from app.services.tmdb import MOVIE_GENRES, TV_GENRES, get_tmdb
+
+_TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185"
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +218,52 @@ async def ask_reply(
         intent = classified.get("intent", "general")
         answer = classified.get("answer")
         mutations = classified.get("mutations") or {}
+        dislike = classified.get("dislike") or {}
+
+        # ---- dislike_request: resolve title via TMDB and return a
+        #      "pending" payload. The client renders a poster card with
+        #      a "what didn't you like?" input that posts to
+        #      /ask/dislike-confirm with the tmdb_id we resolved here.
+        if intent == "dislike_request" and dislike.get("title"):
+            tmdb = get_tmdb()
+            kind = dislike.get("kind") or "movie"
+            try:
+                results = (
+                    await tmdb.search_movie(dislike["title"], limit=1)
+                    if kind == "movie"
+                    else await tmdb.search_tv(dislike["title"], limit=1)
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("ask: TMDB search failed for %s: %s", dislike, exc)
+                results = []
+
+            if not results:
+                return JSONResponse({
+                    "answer": (
+                        f"Couldn't find '{dislike['title']}' on TMDB. "
+                        "Try the full title?"
+                    ),
+                    "intent": "general",
+                })
+
+            r = results[0]
+            poster = r.get("poster_path")
+            return JSONResponse({
+                "answer": answer or "Got it — is this the one?",
+                "intent": "dislike_pending",
+                "pending": {
+                    "tmdb_id": r.get("id"),
+                    "kind": kind,
+                    "title": r.get("title") if kind == "movie" else r.get("name"),
+                    "year": (
+                        (r.get("release_date") or "")[:4]
+                        if kind == "movie"
+                        else (r.get("first_air_date") or "")[:4]
+                    ) or None,
+                    "poster_url": f"{_TMDB_POSTER_BASE}{poster}" if poster else None,
+                    "overview": (r.get("overview") or "")[:200],
+                },
+            })
 
     # Step 2: apply mutations if any. Each branch is best-effort and
     # never raises — chat survives DB hiccups.
@@ -344,3 +392,96 @@ async def ask_reply(
     if applied_changes:
         payload["applied"] = applied_changes
     return JSONResponse(payload)
+
+
+@router.post("/ask/dislike-confirm")
+async def ask_dislike_confirm(
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+) -> JSONResponse:
+    """Step 2 of the interactive dislike flow.
+
+    Body: {tmdb_id, kind, title, reason?, year?}
+    Adds the title to UserPreferences.blocked_titles (with the
+    optional reason note), pushes a Recombee -1 rating so collaborative
+    filtering down-weights similar items, and replies with a short
+    confirmation. Always returns HTTP 200; errors live in the body.
+    """
+    account_id = _current_account_id(request)
+    if not account_id:
+        return JSONResponse({"error": "Not signed in."}, status_code=200)
+
+    account = await session.get(Account, account_id)
+    if account is None:
+        return JSONResponse({"error": "Session expired."}, status_code=200)
+
+    user = await _resolve_active_user(request, account, session)
+    if user is None:
+        return JSONResponse({"error": "No member found."}, status_code=200)
+
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+
+    tmdb_id = body.get("tmdb_id")
+    kind = body.get("kind")
+    title = (body.get("title") or "").strip()
+    reason = (body.get("reason") or "").strip()[:300]
+    year = (body.get("year") or "").strip()[:4] if body.get("year") else None
+
+    if not tmdb_id or kind not in ("movie", "tv") or not title:
+        return JSONResponse(
+            {"error": "Missing or invalid title selection."}, status_code=200
+        )
+
+    # Persist into blocked_titles. Each entry: {kind, tmdb_id, title, reason?, year?}.
+    # Hard cap at 50 to keep the JSON column bounded.
+    prefs = await session.get(UserPreferences, user.id)
+    if prefs is None:
+        prefs = UserPreferences(user_id=user.id)
+        session.add(prefs)
+    cur = list(prefs.blocked_titles or [])
+    # Replace any existing entry for the same id+kind so we keep the
+    # latest reason rather than ballooning duplicates.
+    cur = [e for e in cur if not (e.get("tmdb_id") == tmdb_id and e.get("kind") == kind)]
+    entry = {
+        "kind": kind,
+        "tmdb_id": int(tmdb_id),
+        "title": title[:120],
+    }
+    if reason:
+        entry["reason"] = reason
+    if year:
+        entry["year"] = year
+    cur.append(entry)
+    prefs.blocked_titles = cur[:50]
+
+    # Mark TasteCache stale so the next sync rebuilds rec lists with
+    # the new dislike applied.
+    cache = await session.get(TasteCache, user.id)
+    if cache is not None:
+        cache.is_stale = True
+
+    await session.commit()
+
+    # Push Recombee a strong negative signal — RecommendItemsToUser /
+    # RecommendItemsToItem both filter on this and propagate the dislike
+    # to similar items in the latent space.
+    item_id = f"{'movie' if kind == 'movie' else 'tv'}_{tmdb_id}"
+    try:
+        recombee = get_recombee()
+        if recombee.available:
+            await recombee.add_negative_interaction(user.id, item_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("ask: recombee negative interaction failed: %s", exc)
+
+    answer = (
+        f"Got it — \"{title}\" is off your recommendations."
+        + (f" Noted: {reason[:120]}" if reason else "")
+    )
+    return JSONResponse({
+        "answer": answer,
+        "intent": "dislike_confirmed",
+        "applied": [f"blocked: {title}"],
+    })
