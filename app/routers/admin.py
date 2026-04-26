@@ -19,6 +19,11 @@ from sqlalchemy import func, select
 from app.config import get_settings
 from app.database import session_scope
 from app.jobs.content_sync import run_content_sync
+from app.jobs.health_check import (
+    get_last_snapshot,
+    get_recent_history,
+    run_health_checks,
+)
 from app.jobs.user_sync import sync_one_user
 from app.models.account import Account
 from app.models.content import ContentCatalog
@@ -445,3 +450,35 @@ async def admin_similar(
             titled.append({"id": rid, "title": t, "year": y})
 
     return {"seed_id": seed_id, "k": k, "media_type": media_type, "results": titled}
+
+
+@router.get("/health/history")
+async def admin_health_history(
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Rolling 24h buffer of hourly health-check snapshots.
+
+    Each entry is a full HealthSnapshot dict with per-service status,
+    elapsed_ms, error message, and the deep-dive `detail` block (config,
+    rate-limit headers, verdict, remediation hints).
+    """
+    _require_admin(x_admin_token)
+    history = get_recent_history()
+    last = get_last_snapshot()
+    return {
+        "last": last.to_dict() if last else None,
+        "history_count": len(history),
+        "history": [snap.to_dict() for snap in history],
+    }
+
+
+@router.post("/health/run", status_code=status.HTTP_202_ACCEPTED)
+async def admin_health_run(
+    background: BackgroundTasks,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Trigger a health snapshot immediately. Result lands in
+    /admin/health/history within ~10s (LLM probe is the slowest)."""
+    _require_admin(x_admin_token)
+    background.add_task(run_health_checks)
+    return {"status": "scheduled", "job": "health_check"}

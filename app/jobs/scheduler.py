@@ -1,8 +1,9 @@
-"""APScheduler setup. Registers the three background jobs on startup."""
+"""APScheduler setup. Registers the four background jobs on startup."""
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -10,6 +11,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
 from app.jobs.content_sync import run_content_sync
+from app.jobs.health_check import run_health_checks
 from app.jobs.token_refresh import run_token_refresh
 from app.jobs.user_sync import run_user_sync
 
@@ -53,6 +55,20 @@ def start_scheduler() -> AsyncIOScheduler:
         run_token_refresh,
         trigger=IntervalTrigger(hours=settings.token_refresh_interval_hours),
         id="token_refresh",
+        replace_existing=True,
+        max_instances=1,
+        coalesce=True,
+    )
+
+    # Hourly sanity check — DB / Trakt / TMDB / Recombee / LLM. Quiet on
+    # the happy path; logs WARNING with deep-dive detail on degradation.
+    # First run fires 30 s after boot so operators see initial state in
+    # logs without waiting an hour.
+    scheduler.add_job(
+        run_health_checks,
+        trigger=IntervalTrigger(hours=1),
+        id="health_check",
+        next_run_time=datetime.utcnow() + timedelta(seconds=30),
         replace_existing=True,
         max_instances=1,
         coalesce=True,
