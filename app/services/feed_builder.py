@@ -62,34 +62,46 @@ def _join_genre_ids(ids: list[int]) -> str:
 
 
 def _prefs_extra_params(
-    prefs: UserPreferences | None, media_type: str
+    prefs: UserPreferences | None,
+    media_type: str,
+    *,
+    row_has_with_genres: bool = False,
 ) -> str:
-    """Build the extra TMDB /discover params dictated by user preferences.
+    """Build extra TMDB /discover params from user preferences.
 
-    Returns a string like '&without_genres=27,53&include_adult=false' that
-    can be appended to an existing parameters string. Empty string when no
+    Returns a string like '&without_genres=27&include_adult=false' that
+    can be appended to an existing parameters string. Empty when no
     preferences apply.
+
+    `row_has_with_genres` should be True for rows that already define a
+    `with_genres=` in their base params (top_genre, second_genre). When
+    set, we suppress the pacing-driven genre boost — TMDB's URL parser
+    keeps only the LAST `with_genres` value, so emitting a second one
+    would wipe the row's intended genre.
+
+    Effects:
+      - excluded_movie_genres / excluded_show_genres → without_genres
+      - family_safe → include_adult=false (+ cert floor on movies)
+      - era_preference (0..100) → primary_release_date / first_air_date
+        bounds, only on strong ends (≤30 or ≥70).
+      - pacing_preference (0..100) → genre boost (action genres for high,
+        drama/doc for low) — skipped when row_has_with_genres.
+      - runtime_preference (0..100) → with_runtime.lte / with_runtime.gte
+        on the same edge bands.
     """
     if prefs is None:
         return ""
     parts: list[str] = []
 
-    # Excluded genres → without_genres
     excluded = prefs.excluded_movie_genres if media_type == "movies" else prefs.excluded_show_genres
     if excluded:
         parts.append(f"without_genres={','.join(str(g) for g in excluded)}")
 
-    # Family-safe → drop adult, cap movie certifications. TV doesn't have a
-    # single global cert system on TMDB, so we only apply the cert floor to
-    # movies; the include_adult=false flag works for both.
     if prefs.family_safe:
         parts.append("include_adult=false")
         if media_type == "movies":
             parts.append("certification_country=US&certification.lte=PG-13")
 
-    # Era preference: only skew on the strong ends to avoid overfitting.
-    # 0..30   → "I love classics" — cap release year at 2005
-    # 70..100 → "only new" — floor at 5 years ago
     if prefs.era_preference <= 30:
         if media_type == "movies":
             parts.append("primary_release_date.lte=2005-12-31")
@@ -101,6 +113,22 @@ def _prefs_extra_params(
             parts.append(f"primary_release_date.gte={cutoff}-01-01")
         else:
             parts.append(f"first_air_date.gte={cutoff}-01-01")
+
+    pacing = max(0, min(100, prefs.pacing_preference or 50))
+    if not row_has_with_genres:
+        if pacing >= 70:
+            if media_type == "movies":
+                parts.append("with_genres=28,12,53")  # Action / Adventure / Thriller
+            else:
+                parts.append("with_genres=10759,80")  # Action&Adventure / Crime
+        elif pacing <= 30:
+            parts.append("with_genres=18,99")         # Drama / Documentary
+
+    runtime = max(0, min(100, prefs.runtime_preference or 50))
+    if runtime <= 25:
+        parts.append("with_runtime.lte=100")
+    elif runtime >= 75:
+        parts.append("with_runtime.gte=130")
 
     return ("&" + "&".join(parts)) if parts else ""
 
@@ -158,8 +186,14 @@ async def build_feeds(
         taste.show_genre_scores if taste else None, 3, exclude=excluded_show
     )
 
+    # Two variants — `_safe` is for rows that ALREADY set with_genres in
+    # their base params (top_genre, second_genre). The pacing-genre boost
+    # is suppressed there to avoid TMDB's URL parser overwriting the
+    # row's primary genre.
     movie_pref_extra = _prefs_extra_params(prefs, "movies")
     show_pref_extra = _prefs_extra_params(prefs, "shows")
+    movie_pref_safe = _prefs_extra_params(prefs, "movies", row_has_with_genres=True)
+    show_pref_safe = _prefs_extra_params(prefs, "shows", row_has_with_genres=True)
     gem_vote_min, gem_pop_max = _hidden_gem_thresholds(prefs)
 
     top_movie_genres_str = _join_genre_ids(movie_genre_ids)
@@ -197,11 +231,12 @@ async def build_feeds(
             "content_type": "movies",
         })
     else:
-        params = (
-            f"with_genres={top_movie_genres_str}&sort_by=popularity.desc"
-            if top_movie_genres_str
-            else "sort_by=popularity.desc"
-        ) + movie_pref_extra
+        # Fallback (no Recombee list yet): use safe variant when we
+        # already specify with_genres so pacing doesn't overwrite it.
+        if top_movie_genres_str:
+            params = f"with_genres={top_movie_genres_str}&sort_by=popularity.desc" + movie_pref_safe
+        else:
+            params = "sort_by=popularity.desc" + movie_pref_extra
         feeds.append({
             "id": "recommended_movies",
             "title": "Recommended For You",
@@ -219,11 +254,10 @@ async def build_feeds(
             "content_type": "shows",
         })
     else:
-        params = (
-            f"with_genres={top_show_genres_str}&sort_by=popularity.desc"
-            if top_show_genres_str
-            else "sort_by=popularity.desc"
-        ) + show_pref_extra
+        if top_show_genres_str:
+            params = f"with_genres={top_show_genres_str}&sort_by=popularity.desc" + show_pref_safe
+        else:
+            params = "sort_by=popularity.desc" + show_pref_extra
         feeds.append({
             "id": "recommended_shows",
             "title": "Recommended For You",
@@ -326,7 +360,7 @@ async def build_feeds(
             "parameters": (
                 f"with_genres={top_movie_genre_id}"
                 f"&sort_by=vote_average.desc&vote_count.gte=300"
-                f"{movie_pref_extra}"
+                f"{movie_pref_safe}"
             ),
         },
         "content_type": "movies",
@@ -340,7 +374,7 @@ async def build_feeds(
             "parameters": (
                 f"with_genres={top_show_genre_id}"
                 f"&sort_by=vote_average.desc&vote_count.gte=100"
-                f"{show_pref_extra}"
+                f"{show_pref_safe}"
             ),
         },
         "content_type": "shows",

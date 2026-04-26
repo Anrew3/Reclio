@@ -162,6 +162,22 @@ async def onboarding_save(
     prefs.onboarding_completed = True
     prefs.updated_at = datetime.utcnow()
 
+    # Explicit fine-tune sliders (always honored — they override LLM-derived
+    # values below). Each slider is clamped to [0, 100] defensively.
+    def _slider(name: str, default: int) -> int:
+        raw = form.get(name)
+        if raw is None:
+            return default
+        try:
+            return max(0, min(100, int(raw)))
+        except (TypeError, ValueError):
+            return default
+
+    prefs.era_preference = _slider("era_preference", prefs.era_preference)
+    prefs.pacing_preference = _slider("pacing_preference", prefs.pacing_preference)
+    prefs.runtime_preference = _slider("runtime_preference", prefs.runtime_preference)
+    prefs.discovery_level = _slider("discovery_level", prefs.discovery_level)
+
     # If the LLM is configured, ask it to derive structured prefs.
     # Otherwise we keep whatever values prefs already has — the family-safe
     # toggle still applies because the user set it explicitly.
@@ -180,16 +196,24 @@ async def onboarding_save(
         except Exception as exc:  # noqa: BLE001
             logger.warning("onboarding: LLM derivation failed for %s: %s", user.id, exc)
 
+    # When LLM derived a profile, it sets the *interpretive* fields
+    # (moods, genres, vibe). Numeric sliders are kept as the user
+    # explicitly set them above — the slider always wins because it's
+    # a deliberate user action; the LLM only fills gaps it inferred.
     if derived:
         prefs.favorite_moods = derived.get("favorite_moods") or []
         prefs.excluded_movie_genres = derived.get("excluded_movie_genres") or []
         prefs.excluded_show_genres = derived.get("excluded_show_genres") or []
-        prefs.era_preference = derived.get("era_preference", 50)
-        # The LLM-inferred family_safe is OR-ed with the explicit toggle so
-        # checking the box always wins, but the LLM can also infer it from
-        # answers like "I'm setting this up for my kids".
+        # The LLM-inferred family_safe is OR-ed with the explicit toggle
+        # so checking the box always wins, but the LLM can also infer it
+        # from answers like "I'm setting this up for my kids".
         prefs.family_safe = bool(derived.get("family_safe")) or family_safe_explicit
         prefs.vibe_summary = derived.get("vibe_summary")
+        # First-run convenience: if the user left the era slider at its
+        # 50 default, accept the LLM-inferred era. After that, the
+        # slider takes over permanently.
+        if prefs.era_preference == 50 and "era_preference" in derived:
+            prefs.era_preference = derived["era_preference"]
     else:
         prefs.family_safe = family_safe_explicit
 

@@ -28,9 +28,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import get_settings
 from app.database import get_session
 from app.models.account import Account
+from app.models.preferences import UserPreferences
 from app.models.taste_cache import TasteCache
+from app.routers.onboarding import MOODS as MOOD_PALETTE
 from app.routers.portal import _current_account_id, _recently_watched, _resolve_active_user
 from app.services.llm import get_llm
+from app.services.recombee import get_recombee
 from app.services.tmdb import MOVIE_GENRES, TV_GENRES
 
 logger = logging.getLogger(__name__)
@@ -190,15 +193,146 @@ async def ask_reply(
         logger.debug("ask: recently_watched failed for %s: %s", user.id, exc)
         recent = []
 
+    # Step 1: classify intent. Did the user ask to *change* something
+    # ("stop showing me horror") or just *ask* ("why is this row here")?
+    intent = "general"
+    answer = None
+    mutations: dict = {}
+    applied_changes: list[str] = []
+
     try:
-        answer = await llm.ask_reclio(
+        classified = await llm.classify_chat_intent(
             question,
-            user_taste=_format_taste(taste),
+            mood_palette=MOOD_PALETTE,
+            movie_genres=MOVIE_GENRES,
+            tv_genres=TV_GENRES,
             recently_watched=recent,
         )
     except Exception as exc:  # noqa: BLE001
-        logger.warning("ask: LLM call failed for %s: %s", user.id, exc)
-        answer = None
+        logger.warning("ask: intent classify failed for %s: %s", user.id, exc)
+        classified = None
+
+    if classified:
+        intent = classified.get("intent", "general")
+        answer = classified.get("answer")
+        mutations = classified.get("mutations") or {}
+
+    # Step 2: apply mutations if any. Each branch is best-effort and
+    # never raises — chat survives DB hiccups.
+    if intent == "mutate" and mutations:
+        try:
+            prefs = await session.get(UserPreferences, user.id)
+            if prefs is None:
+                prefs = UserPreferences(user_id=user.id)
+                session.add(prefs)
+
+            def _bump(field: str, delta_key: str) -> None:
+                d = mutations.get(delta_key, 0)
+                if not d:
+                    return
+                cur = getattr(prefs, field) or 50
+                new = max(0, min(100, cur + d))
+                if new != cur:
+                    setattr(prefs, field, new)
+                    direction = "up" if new > cur else "down"
+                    applied_changes.append(f"{field.replace('_', ' ')} {direction}")
+
+            _bump("era_preference", "delta_era")
+            _bump("pacing_preference", "delta_pacing")
+            _bump("runtime_preference", "delta_runtime")
+            _bump("discovery_level", "delta_discovery")
+
+            # Genre exclusions — set-union with existing
+            for src_key, dst_attr in (
+                ("exclude_movie_genres", "excluded_movie_genres"),
+                ("exclude_show_genres", "excluded_show_genres"),
+            ):
+                add = mutations.get(src_key) or []
+                if not add:
+                    continue
+                cur = list(getattr(prefs, dst_attr) or [])
+                merged = sorted(set(cur) | set(add))
+                if merged != cur:
+                    setattr(prefs, dst_attr, merged)
+                    applied_changes.append(f"{len(add)} genre(s) excluded")
+
+            # Keyword lists — set-union, capped at 25 entries to stop
+            # the prefs row growing unboundedly through chat.
+            def _merge_kw(attr: str, add: list[str], label: str) -> None:
+                if not add:
+                    return
+                cur = list(getattr(prefs, attr) or [])
+                merged = []
+                seen = set()
+                for v in cur + add:
+                    s = (v or "").strip().lower()
+                    if s and s not in seen:
+                        seen.add(s)
+                        merged.append(s)
+                merged = merged[:25]
+                if merged != cur:
+                    setattr(prefs, attr, merged)
+                    applied_changes.append(label)
+
+            _merge_kw("boosted_keywords", mutations.get("boost_keywords") or [], "boosted")
+            _merge_kw("excluded_keywords", mutations.get("exclude_keywords") or [], "muted")
+
+            # Title blocks — push as Recombee negative interactions for
+            # any titles we can resolve to a TMDB id from recent watches
+            # or the catalog. Even without resolution we keep the title
+            # string for display so the user can see Reclio remembers.
+            new_blocks = mutations.get("block_titles") or []
+            if new_blocks:
+                cur = list(prefs.blocked_titles or [])
+                seen_titles = {b.get("title", "").lower() for b in cur}
+                added = 0
+                for b in new_blocks:
+                    if b.get("title", "").lower() in seen_titles:
+                        continue
+                    cur.append(b)
+                    added += 1
+                if added:
+                    prefs.blocked_titles = cur[:50]  # hard cap
+                    applied_changes.append(f"{added} title(s) blocked")
+
+                # Send Recombee a -1 rating for any block whose title
+                # matches a recent watch — best-effort id resolution.
+                recombee = get_recombee()
+                if recombee.available:
+                    title_to_item = {}
+                    for w in recent:
+                        if w.get("tmdb_id") and w.get("title"):
+                            prefix = "movie" if w.get("kind") == "movie" else "tv"
+                            title_to_item[w["title"].lower()] = f"{prefix}_{w['tmdb_id']}"
+                    for b in new_blocks:
+                        item_id = title_to_item.get(b.get("title", "").lower())
+                        if item_id:
+                            try:
+                                await recombee.add_negative_interaction(user.id, item_id)
+                            except Exception:  # noqa: BLE001
+                                pass
+
+            # Mark TasteCache stale so the next sync rebuilds rec lists
+            # with the new excluded/boosted set.
+            if applied_changes:
+                cache = await session.get(TasteCache, user.id)
+                if cache is not None:
+                    cache.is_stale = True
+                await session.commit()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ask: mutation apply failed for %s: %s", user.id, exc)
+
+    # Step 3: generate the natural reply if the classifier didn't already
+    # return one (or returned an empty/missing answer for general/explain).
+    if not answer and intent in ("explain", "general"):
+        try:
+            answer = await llm.ask_reclio(
+                question,
+                user_taste=_format_taste(taste),
+                recently_watched=recent,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ask: LLM call failed for %s: %s", user.id, exc)
 
     if not answer:
         return JSONResponse(
@@ -206,4 +340,7 @@ async def ask_reply(
             status_code=200,
         )
 
-    return JSONResponse({"answer": answer})
+    payload = {"answer": answer, "intent": intent}
+    if applied_changes:
+        payload["applied"] = applied_changes
+    return JSONResponse(payload)

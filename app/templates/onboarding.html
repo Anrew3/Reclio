@@ -54,6 +54,42 @@
   </section>
   {% endfor %}
 
+  <section class="ios-card finetune-card">
+    <h3 class="title-3">Fine-tune</h3>
+    <p class="callout">Optional explicit overrides. The conversational
+      profile already feeds these — touch them only if you want to nudge
+      a specific direction.</p>
+
+    {% set sliders = [
+      {"name": "era_preference",      "label": "Era",        "low": "Classics",   "high": "Brand new",   "value": prefs.era_preference},
+      {"name": "pacing_preference",   "label": "Pacing",     "low": "Slow burn",  "high": "Action-packed","value": prefs.pacing_preference},
+      {"name": "runtime_preference",  "label": "Length",     "low": "Tight",      "high": "Epic",        "value": prefs.runtime_preference},
+      {"name": "discovery_level",     "label": "Discovery",  "low": "Comfort",    "high": "Push limits", "value": prefs.discovery_level},
+    ] %}
+
+    {% for s in sliders %}
+    <div class="taste-section finetune-slider">
+      <div class="finetune-head">
+        <p class="subheadline label-secondary">{{ s.label }}</p>
+        <span class="finetune-readout" data-out="out-{{ s.name }}">{{ s.low if s.value < 35 else (s.high if s.value > 65 else 'Balanced') }}</span>
+      </div>
+      <input
+        type="range"
+        name="{{ s.name }}"
+        min="0" max="100" step="5"
+        value="{{ s.value }}"
+        class="ios-slider-v2"
+        oninput="this.style.setProperty('--fill', this.value + '%'); window._reclioReadout && window._reclioReadout('{{ s.name }}', this.value);"
+        style="--fill: {{ s.value }}%;"
+      />
+      <div class="slider-ends">
+        <span>{{ s.low }}</span>
+        <span>{{ s.high }}</span>
+      </div>
+    </div>
+    {% endfor %}
+  </section>
+
   <section class="ios-card">
     <label class="toggle-row">
       <div>
@@ -63,6 +99,43 @@
       <input type="checkbox" name="family_safe" {% if prefs.family_safe %}checked{% endif %} class="ios-toggle">
     </label>
   </section>
+
+  {% if prefs.boosted_keywords or prefs.excluded_keywords or prefs.blocked_titles %}
+  <section class="ios-card">
+    <h3 class="title-3">Things you've told Reclio</h3>
+    {% if prefs.boosted_keywords %}
+      <div class="taste-section">
+        <p class="subheadline label-secondary">More like</p>
+        <div class="pill-row">
+          {% for kw in prefs.boosted_keywords %}
+            <span class="genre-pill top">{{ kw }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+    {% if prefs.excluded_keywords %}
+      <div class="taste-section">
+        <p class="subheadline label-secondary">Less of</p>
+        <div class="pill-row">
+          {% for kw in prefs.excluded_keywords %}
+            <span class="genre-pill excluded">{{ kw }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+    {% if prefs.blocked_titles %}
+      <div class="taste-section">
+        <p class="subheadline label-secondary">Never recommend</p>
+        <div class="pill-row">
+          {% for bt in prefs.blocked_titles %}
+            <span class="genre-pill excluded">{{ bt.title }}</span>
+          {% endfor %}
+        </div>
+      </div>
+    {% endif %}
+    <p class="footnote">Manage these by chatting with Reclio.</p>
+  </section>
+  {% endif %}
 
   <div class="cta">
     <button type="submit" class="btn btn-primary" id="submit-btn">
@@ -91,6 +164,20 @@
     resize();
     t.addEventListener('input', resize);
   });
+  // Live slider label updates ("Classics" / "Balanced" / "Brand new")
+  const sliderLabels = {
+    era_preference:     ['Classics', 'Balanced', 'Brand new'],
+    pacing_preference:  ['Slow burn', 'Balanced', 'Action-packed'],
+    runtime_preference: ['Tight', 'Balanced', 'Epic'],
+    discovery_level:    ['Comfort', 'Balanced', 'Push limits'],
+  };
+  window._reclioReadout = function(name, value){
+    const out = document.querySelector('[data-out="out-' + name + '"]');
+    if (!out) return;
+    const labels = sliderLabels[name] || ['Low', 'Mid', 'High'];
+    const v = parseInt(value, 10);
+    out.textContent = v < 35 ? labels[0] : (v > 65 ? labels[2] : labels[1]);
+  };
 })();
 </script>
 {% endblock %}

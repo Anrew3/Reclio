@@ -606,6 +606,86 @@ p { margin: 0; }
   color: var(--label-tertiary);
 }
 
+/* Fine-tune card with iOS-style filled sliders */
+
+.finetune-card .callout { margin-top: 4px; margin-bottom: 8px; }
+
+.finetune-slider { padding: 14px 0; }
+
+.finetune-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 10px;
+}
+
+.finetune-readout {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-blue);
+  letter-spacing: -0.01em;
+}
+
+.slider-ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 6px;
+  color: var(--label-tertiary);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+/* Track is a filled-from-left iOS slider. Uses a CSS var --fill set
+   inline by the input handler, so the tinted portion grows with the
+   thumb without JS doing layout. */
+.ios-slider-v2 {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  outline: none;
+  background:
+    linear-gradient(
+      to right,
+      var(--accent-blue) 0%,
+      var(--accent-blue) var(--fill, 50%),
+      var(--bg-tertiary) var(--fill, 50%),
+      var(--bg-tertiary) 100%
+    );
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.ios-slider-v2::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: white;
+  cursor: grab;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5),
+              0 1px 2px rgba(0, 0, 0, 0.4);
+  transition: transform 120ms ease;
+}
+
+.ios-slider-v2::-webkit-slider-thumb:active {
+  transform: scale(1.1);
+  cursor: grabbing;
+}
+
+.ios-slider-v2::-moz-range-thumb {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: white;
+  cursor: grab;
+  border: none;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5),
+              0 1px 2px rgba(0, 0, 0, 0.4);
+}
+
 .pill-row--select { margin-top: 12px; }
 
 .genre-pill--toggle {
@@ -869,6 +949,18 @@ p { margin: 0; }
   color: var(--accent-red);
   font-size: 13px;
   text-align: center;
+}
+
+.chat-bubble-applied {
+  align-self: center;
+  background: rgba(48, 209, 88, 0.16);
+  color: var(--accent-green);
+  font-size: 12px;
+  font-weight: 500;
+  text-align: center;
+  border-radius: 12px;
+  padding: 6px 12px;
+  letter-spacing: 0.01em;
 }
 
 .chat-input-row {

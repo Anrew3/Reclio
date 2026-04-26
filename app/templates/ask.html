@@ -100,6 +100,9 @@
         const data = await resp.json();
         if (data.answer) {
           appendBubble('reclio', data.answer);
+          if (data.applied && data.applied.length) {
+            appendBubble('applied', '✓ Updated: ' + data.applied.join(', '));
+          }
           status.textContent = '';
         } else {
           appendBubble('error', data.error || 'No answer.');

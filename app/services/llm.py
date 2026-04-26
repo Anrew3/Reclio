@@ -345,6 +345,181 @@ class LLMService:
         self._cache.set(key, cleaned)
         return cleaned
 
+    async def classify_chat_intent(
+        self,
+        question: str,
+        *,
+        mood_palette: list[str],
+        movie_genres: dict[int, str],
+        tv_genres: dict[int, str],
+        recently_watched: list[dict] | None = None,
+    ) -> dict[str, Any] | None:
+        """Classify a chat message into either a mutation or an explanation.
+
+        Returns a dict with the structure:
+            {
+              "intent": "mutate" | "explain" | "general",
+              "answer": "natural-language reply for the chat bubble",
+              "mutations": {              # only present when intent=mutate
+                  "delta_era": int -50..50,
+                  "delta_pacing": int -50..50,
+                  "delta_runtime": int -50..50,
+                  "delta_discovery": int -50..50,
+                  "exclude_movie_genres": [int],
+                  "exclude_show_genres": [int],
+                  "boost_keywords": [str],
+                  "exclude_keywords": [str],
+                  "block_titles": [{"title": str, "kind": "movie"|"tv"}],
+              }
+            }
+
+        The handler calling this method applies the mutations to
+        UserPreferences and replies to the user with `answer`. None on
+        provider failure — caller falls back to ask_reclio.
+        """
+        if not self.enabled:
+            return None
+        safe_q = sanitize_for_prompt(question, max_len=500)
+        if not safe_q:
+            return None
+
+        # Lean watched-context — useful for "why am I seeing X" questions
+        # where the LLM can reference what the viewer recently consumed.
+        watched_bits = []
+        for w in (recently_watched or [])[:5]:
+            t = sanitize_for_prompt(w.get("title") or "", 80)
+            if t:
+                watched_bits.append(f"'{t}'")
+        watched_ctx = (", ".join(watched_bits)) if watched_bits else "(none yet)"
+
+        moods_str = ", ".join(mood_palette)
+        # Compact genre list — LLM doesn't need names, just IDs to choose from
+        movie_ids = ",".join(str(i) for i in movie_genres.keys())
+        tv_ids = ",".join(str(i) for i in tv_genres.keys())
+
+        prompt = (
+            "You are Reclio's chat backend. Classify the viewer's message and\n"
+            "respond with ONE JSON object — no prose, no markdown fence — matching:\n"
+            '{\n'
+            '  "intent": "mutate" | "explain" | "general",\n'
+            '  "answer": "string, max 280 chars",\n'
+            '  "mutations": {                          // include only when intent==mutate\n'
+            '     "delta_era": int -50..50,            // negative = older, positive = newer\n'
+            '     "delta_pacing": int -50..50,         // negative = slower, positive = more action\n'
+            '     "delta_runtime": int -50..50,        // negative = shorter, positive = longer\n'
+            '     "delta_discovery": int -50..50,      // negative = safer, positive = more discovery\n'
+            '     "exclude_movie_genres": [int from this list: ' + movie_ids + '],\n'
+            '     "exclude_show_genres":  [int from this list: ' + tv_ids + '],\n'
+            '     "boost_keywords":   [string],         // 1-3 words each\n'
+            '     "exclude_keywords": [string],\n'
+            '     "block_titles": [{"title": str, "kind": "movie"|"tv"}]\n'
+            '  }\n'
+            '}\n\n'
+            "Rules:\n"
+            "- intent=mutate when the message asks to change recommendations\n"
+            "  ('stop showing me X', 'I want more X', 'newer movies please',\n"
+            "  'never recommend Inception again', 'less action').\n"
+            "- intent=explain when the message asks WHY something appears\n"
+            "  ('why do I keep seeing X', 'what makes you think I want this').\n"
+            "- intent=general for anything else (recommendations, chitchat).\n"
+            "- For mutate: ONLY include delta/list keys you actually changed. Use 0 / [] for unused.\n"
+            "- For explain: ground the answer in the viewer's recent watches "
+            f"({watched_ctx}) and avoid hedging.\n"
+            "- Keep answer under 280 chars. Be warm and direct.\n"
+            "- Allowed mood vocabulary: " + moods_str + "\n\n"
+            f"Viewer message: {safe_q}\n\n"
+            "JSON:"
+        )
+
+        result = await self.provider.generate(prompt, max_tokens=500, temperature=0.3)
+        if not result:
+            return None
+
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].lstrip()
+            cleaned = cleaned.split("```", 1)[0].strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            import json
+            parsed = json.loads(cleaned[start:end + 1])
+        except (ValueError, TypeError):
+            return None
+
+        intent = parsed.get("intent")
+        if intent not in ("mutate", "explain", "general"):
+            intent = "general"
+        answer = str(parsed.get("answer") or "").strip()[:320]
+
+        mutations: dict[str, Any] = {}
+        if intent == "mutate":
+            raw = parsed.get("mutations") or {}
+
+            def _clamp_delta(v: Any) -> int:
+                try:
+                    return max(-50, min(50, int(v)))
+                except (TypeError, ValueError):
+                    return 0
+
+            for key in ("delta_era", "delta_pacing", "delta_runtime", "delta_discovery"):
+                d = _clamp_delta(raw.get(key, 0))
+                if d:
+                    mutations[key] = d
+
+            mvg = set(movie_genres.keys())
+            tvg = set(tv_genres.keys())
+            ex_mv = [int(g) for g in (raw.get("exclude_movie_genres") or [])
+                     if isinstance(g, (int, float)) and int(g) in mvg]
+            ex_tv = [int(g) for g in (raw.get("exclude_show_genres") or [])
+                     if isinstance(g, (int, float)) and int(g) in tvg]
+            if ex_mv:
+                mutations["exclude_movie_genres"] = ex_mv
+            if ex_tv:
+                mutations["exclude_show_genres"] = ex_tv
+
+            def _clean_kw_list(values: Any, cap: int = 5) -> list[str]:
+                out: list[str] = []
+                seen: set[str] = set()
+                for v in (values or []):
+                    if not isinstance(v, str):
+                        continue
+                    s = v.strip().lower()[:40]
+                    if s and s not in seen:
+                        seen.add(s)
+                        out.append(s)
+                    if len(out) >= cap:
+                        break
+                return out
+
+            bk = _clean_kw_list(raw.get("boost_keywords"))
+            ek = _clean_kw_list(raw.get("exclude_keywords"))
+            if bk:
+                mutations["boost_keywords"] = bk
+            if ek:
+                mutations["exclude_keywords"] = ek
+
+            blocks: list[dict] = []
+            for b in (raw.get("block_titles") or [])[:5]:
+                if not isinstance(b, dict):
+                    continue
+                t = sanitize_for_prompt(b.get("title") or "", 100)
+                k = b.get("kind") if b.get("kind") in ("movie", "tv") else None
+                if t and k:
+                    blocks.append({"title": t, "kind": k})
+            if blocks:
+                mutations["block_titles"] = blocks
+
+        return {
+            "intent": intent,
+            "answer": answer or None,
+            "mutations": mutations,
+        }
+
     async def derive_preferences(
         self,
         answers: dict[str, str],

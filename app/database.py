@@ -92,6 +92,32 @@ async def _migrate_add_preference_columns(conn) -> None:
             text("ALTER TABLE user_preferences ADD COLUMN vibe_summary VARCHAR")
         )
         logger.info("migration: added user_preferences.vibe_summary column")
+    # v1.3 fine-tune controls + chat-driven mutations
+    if "pacing_preference" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE user_preferences ADD COLUMN pacing_preference INTEGER DEFAULT 50")
+        )
+        logger.info("migration: added user_preferences.pacing_preference column")
+    if "runtime_preference" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE user_preferences ADD COLUMN runtime_preference INTEGER DEFAULT 50")
+        )
+        logger.info("migration: added user_preferences.runtime_preference column")
+    if "excluded_keywords" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE user_preferences ADD COLUMN excluded_keywords JSON")
+        )
+        logger.info("migration: added user_preferences.excluded_keywords column")
+    if "boosted_keywords" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE user_preferences ADD COLUMN boosted_keywords JSON")
+        )
+        logger.info("migration: added user_preferences.boosted_keywords column")
+    if "blocked_titles" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE user_preferences ADD COLUMN blocked_titles JSON")
+        )
+        logger.info("migration: added user_preferences.blocked_titles column")
 
 
 async def _backfill_accounts_for_orphan_users() -> None:

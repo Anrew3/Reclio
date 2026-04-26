@@ -281,8 +281,14 @@
           body: JSON.stringify({question: q}),
         });
         const data = await resp.json();
-        if (data.answer) appendBubble('reclio', data.answer);
-        else appendBubble('error', data.error || 'No answer.');
+        if (data.answer) {
+          appendBubble('reclio', data.answer);
+          if (data.applied && data.applied.length) {
+            appendBubble('applied', '✓ Updated preferences: ' + data.applied.join(', '));
+          }
+        } else {
+          appendBubble('error', data.error || 'No answer.');
+        }
       } catch(e) {
         appendBubble('error', 'Network error. Try again.');
       } finally {

@@ -25,10 +25,14 @@ class UserPreferences(Base):
     onboarding_completed: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # 0..100 sliders. 50 = neutral default that matches today's behavior.
-    #   discovery_level: 0 = only popular, 100 = chase hidden gems
-    #   era_preference:  0 = love classics, 100 = only new
+    #   discovery_level:  0 = only popular     →  100 = chase hidden gems
+    #   era_preference:   0 = love classics    →  100 = only new
+    #   pacing_preference: 0 = slow burn       →  100 = action-packed
+    #   runtime_preference: 0 = short and tight → 100 = long-form epics
     discovery_level: Mapped[int] = mapped_column(Integer, default=50)
     era_preference: Mapped[int] = mapped_column(Integer, default=50)
+    pacing_preference: Mapped[int] = mapped_column(Integer, default=50)
+    runtime_preference: Mapped[int] = mapped_column(Integer, default=50)
 
     # Genre IDs (TMDB) the user wants completely filtered out.
     # Lists are intentionally separate per media type because TMDB uses
@@ -53,5 +57,18 @@ class UserPreferences(Base):
     # One-paragraph LLM-written summary of the viewer's taste. Reused by
     # Ask Reclio for context grounding. NULL until first onboarding pass.
     vibe_summary: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Free-form keyword lists driven by chat ("stop showing me X" / "I want
+    # more Y"). Lowercased + length-capped. Used as soft boost/penalty
+    # signals — not enforced as hard filters because TMDB doesn't have a
+    # text-keyword query that maps cleanly.
+    excluded_keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    boosted_keywords: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # Specific TMDB IDs the user has said "never show me again". Stored as
+    # [{"kind": "movie"|"tv", "tmdb_id": int, "title": str}]. Pushed to
+    # Recombee as negative interactions so they get down-weighted in
+    # collaborative filtering too.
+    blocked_titles: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

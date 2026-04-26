@@ -376,6 +376,28 @@ class RecombeeService:
             logger.debug("Recombee RecommendItemsToUser failed: %s", exc)
             return []
 
+    async def add_negative_interaction(self, user_id: str, item_id: str) -> None:
+        """Record a "do not show me this" signal as a low rating.
+
+        Recombee doesn't have a native "negative interaction" verb; the
+        canonical pattern is to send AddRating with the lowest possible
+        score, which both:
+          - removes the item from future RecommendItemsToUser results for
+            this user (interactions filter is automatic)
+          - down-weights similar items in the collaborative model
+        Failures are swallowed so chat-driven blocks never break the UX.
+        """
+        if not self._client:
+            return
+        rq = self._rq
+        try:
+            await asyncio.to_thread(
+                self._client.send,
+                rq.AddRating(user_id, item_id, -1.0, cascade_create=True),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Recombee AddRating(-1) failed: %s", exc)
+
     async def recommend_items_to_item(
         self,
         item_id: str,
