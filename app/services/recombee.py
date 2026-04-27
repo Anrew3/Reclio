@@ -61,18 +61,87 @@ def _safe_import():
 
 
 def _resolve_region(Region, name: str):
-    """Map a config string like 'us-west' to a Region enum member."""
+    """Map a config string like 'us-west' to a Region enum member.
+
+    Returns None when the SDK doesn't expose a Region enum at all (5.x
+    in some packagings) or when the requested member doesn't exist.
+    The caller MUST also try the string form below — passing region=None
+    silently uses the SDK's default region, which broke prod.
+    """
     if Region is None or not name:
         return None
     key = name.strip().upper().replace("-", "_")
     member = getattr(Region, key, None)
     if member is not None:
         return member
-    # Fallbacks for common aliases
     aliases = {"US": "US_WEST", "EU": "EU_WEST", "AP": "AP_SE"}
     for alias, real in aliases.items():
         if key.startswith(alias):
             return getattr(Region, real, None)
+    return None
+
+
+def _make_recombee_client(client_cls, db_id: str, token: str,
+                          region_str: str, region_enum: Any | None) -> Any | None:
+    """Construct a RecombeeClient that survives SDK 4.x and 5.x signature drift.
+
+    Tries, in order:
+      1. region=Region.US_WEST  (4.x + 5.x with Region enum)
+      2. region="us-west"       (5.x string form)
+      3. options={"region": "us-west"}  (alternative dict form some SDKs use)
+      4. (no region kwarg)      (SDK default — only as last resort)
+
+    Most-specific first so we never silently fall through to the default
+    region the way 1.6.x did. The `wrong_region` verdict in the v1.5
+    health check was telling us this exact thing — items going to the
+    wrong DB because Region enum lookup returned None and we then
+    instantiated without any region arg at all.
+    """
+    last_exc: Exception | None = None
+
+    if region_enum is not None:
+        try:
+            return client_cls(db_id, token, region=region_enum)
+        except TypeError as exc:
+            # 5.x can drop the `region` kwarg — fall through to string form
+            last_exc = exc
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+
+    if region_str:
+        try:
+            return client_cls(db_id, token, region=region_str)
+        except TypeError as exc:
+            last_exc = exc
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+
+        try:
+            return client_cls(db_id, token, options={"region": region_str})
+        except TypeError as exc:
+            last_exc = exc
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+
+    # Last resort — SDK default region. Logs a WARNING because this is
+    # almost certainly wrong for any non-default user.
+    try:
+        client = client_cls(db_id, token)
+        logger.warning(
+            "Recombee client created without region argument — every SDK "
+            "constructor signature was rejected. Items will go to the SDK's "
+            "default region (likely AP_SE) instead of '%s'. "
+            "This is the cause of the v1.5 health check's `wrong_region` "
+            "verdict — please report which recombee-api-client version "
+            "you have installed so we can wire its signature correctly.",
+            region_str,
+        )
+        return client
+    except Exception as exc:  # noqa: BLE001
+        last_exc = exc
+
+    if last_exc is not None:
+        logger.warning("Recombee client init failed: %s", last_exc)
     return None
 
 
@@ -93,17 +162,14 @@ class RecombeeService:
 
         self._client = None
         if RecombeeClient and self.database_id and self.private_token:
-            region = _resolve_region(Region, settings.recombee_region)
-            try:
-                if region is not None:
-                    self._client = RecombeeClient(
-                        self.database_id, self.private_token, region=region
-                    )
-                else:
-                    self._client = RecombeeClient(self.database_id, self.private_token)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Recombee client init failed: %s", exc)
-                self._client = None
+            region_enum = _resolve_region(Region, settings.recombee_region)
+            self._client = _make_recombee_client(
+                RecombeeClient,
+                self.database_id,
+                self.private_token,
+                region_str=settings.recombee_region,
+                region_enum=region_enum,
+            )
 
         self._properties_initialized = False
 
