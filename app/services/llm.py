@@ -203,6 +203,14 @@ class ClaudeProvider(LLMProvider):
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
+            # 4xx → log the response body at WARNING so the operator can
+            # see *exactly* what Anthropic is complaining about (invalid
+            # model name, malformed key, missing header, etc.) instead of
+            # silently returning None and leaving them with a 400 in the
+            # httpx access log.
+            if 400 <= resp.status_code < 500:
+                _log_provider_4xx("Claude", resp, model=self.model)
+                return None
             resp.raise_for_status()
             data = resp.json()
             blocks = data.get("content") or []
@@ -212,13 +220,67 @@ class ClaudeProvider(LLMProvider):
                     return text or None
             return None
         except Exception as exc:  # noqa: BLE001
-            logger.debug("Claude generate failed: %s", exc)
+            logger.warning("Claude generate failed (model=%s): %s", self.model, exc)
             return None
 
     async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+
+def _log_provider_4xx(
+    provider: str, resp: Any, *, model: str
+) -> None:
+    """Surface a hosted LLM's 4xx response body so the operator can see
+    the actual rejection message. Scrubs nothing — Anthropic / OpenAI
+    error bodies don't contain credentials, only request-validation
+    details. Capped at 500 chars to keep log lines readable.
+    """
+    body_preview: str
+    err_type = ""
+    try:
+        body = resp.json()
+        # Anthropic shape: {"type":"error","error":{"type":"...","message":"..."}}
+        # OpenAI shape:    {"error":{"message":"...","type":"...","code":"..."}}
+        err = (body or {}).get("error") if isinstance(body, dict) else None
+        if isinstance(err, dict):
+            msg = err.get("message") or ""
+            err_type = (err.get("type") or "").lower()
+            body_preview = f"{err_type}: {msg}"[:500] if err_type or msg else str(body)[:500]
+        else:
+            body_preview = str(body)[:500]
+    except Exception:  # noqa: BLE001
+        body_preview = (resp.text or "")[:500]
+
+    pl = body_preview.lower()
+    hint = ""
+    # Order matters — most specific first.
+    if "not_found" in err_type or "model_not_found" in pl or "does not exist" in pl:
+        hint = (
+            f" | hint: model name '{model}' isn't recognized by this provider. "
+            "Check the provider's current model list — for Anthropic try "
+            "claude-3-5-haiku-latest, claude-3-5-sonnet-latest, or "
+            "claude-haiku-4-5-20250514."
+        )
+    elif "authentication" in err_type or "unauthorized" in pl or "invalid api key" in pl \
+            or resp.status_code == 401:
+        hint = " | hint: API key rejected — verify the value in env"
+    elif "rate_limit" in err_type or "rate limit" in pl or "quota" in pl \
+            or resp.status_code == 429:
+        hint = " | hint: rate-limited — wait a few minutes or check your plan"
+    elif "anthropic-version" in pl:
+        hint = " | hint: anthropic-version header may be too old for this model"
+    elif "invalid_request" in err_type and "model" in pl:
+        hint = (
+            f" | hint: probable model-name issue ('{model}'). "
+            "Check the provider's current model list."
+        )
+
+    logger.warning(
+        "%s API returned HTTP %d (model=%s): %s%s",
+        provider, resp.status_code, model, body_preview, hint,
+    )
 
 
 # ------------------------------ OpenAI --------------------------------
@@ -251,7 +313,7 @@ class OpenAIProvider(LLMProvider):
         self, prompt: str, *, max_tokens: int = 60, temperature: float = 0.7
     ) -> str | None:
         if not self.api_key:
-            logger.debug("OpenAI: no OPENAI_API_KEY set; returning None")
+            logger.debug("%s: no API key set; returning None", self.name)
             return None
         try:
             client = await self._get_client()
@@ -264,6 +326,9 @@ class OpenAIProvider(LLMProvider):
                     "messages": [{"role": "user", "content": prompt}],
                 },
             )
+            if 400 <= resp.status_code < 500:
+                _log_provider_4xx(self.name, resp, model=self.model)
+                return None
             resp.raise_for_status()
             data = resp.json()
             choices = data.get("choices") or []
@@ -273,7 +338,7 @@ class OpenAIProvider(LLMProvider):
                 return text or None
             return None
         except Exception as exc:  # noqa: BLE001
-            logger.debug("OpenAI generate failed: %s", exc)
+            logger.warning("%s generate failed (model=%s): %s", self.name, self.model, exc)
             return None
 
     async def close(self) -> None:
