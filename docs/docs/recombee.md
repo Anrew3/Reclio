@@ -93,6 +93,50 @@ picks into two managed Trakt lists (`Reclio • Recommended Movies`,
 ## Graceful degradation
 
 If Recombee is unavailable (missing keys, network down, rate limit),
-`get_recombee().available` returns `False` and feeds #2 and #3 fall
-back to a TMDB `discover` query filtered by the user's top genres.
-Chillio always gets a valid 22-feed response.
+`get_recombee().available` returns `False` and the *Recommended For You*
+rows fall back to a TMDB `discover` query filtered by the user's top
+genres. The *Because You Watched* rows, when their managed Trakt list
+is empty, fall back to TMDB `/movie/{id}/recommendations` for the
+last-watched item — and on cold-start, the [vector similarity
+service](./embeddings) seeds these rows from semantic neighbors.
+Chillio always gets a valid 10-feed response.
+
+## Recombee vs embeddings — which signal does what?
+
+Reclio uses both **collaborative filtering** (Recombee) and **content-based
+embeddings** because they answer fundamentally different questions:
+
+| Signal | Question | Strength | Weakness |
+|---|---|---|---|
+| **Recombee** | "What does this *user* want next?" | Best when the user has 12+ Trakt interactions; learns from collective behavior across all users | Cold-starts users badly; cold-starts new films invisibly |
+| **Embeddings** | "What is similar to *this film*?" | Always works (no user data needed); catches semantic vibe genre tags miss | Doesn't know what *you* like, only what looks like X |
+
+The *Because You Watched* row is a 60/40 weighted blend of Recombee
+item-to-item + vector neighbors so it gets the best of both: Recombee's
+collective-behavior signal leads, embeddings fill in semantic neighbors
+Recombee's co-watch graph hasn't seen yet.
+
+For new users (`<5` Recombee results) the *Recommended For You* row
+falls back to vector neighbors of the user's highest-rated Trakt
+title so the home screen feels personalized from day one.
+
+## Diagnosing why nothing shows up in the Recombee web UI
+
+The most common silent-failure mode is `wrong_region` — Reclio's
+local catalog is full of items, `recombee_synced=true` on every row,
+but the Recombee web UI shows zero items. New diagnostic endpoint
+detects exactly this:
+
+```bash
+curl -H "X-Admin-Token: T" https://<your-host>/admin/recombee/diagnose | jq .verdict
+```
+
+Returns one of: `ok` / `wrong_region` / `unreachable` /
+`no_pushes_yet` / `writes_silently_failing` / `no_credentials` /
+`sdk_missing` / `client_init_failed`. Each carries `next_steps`
+in plain English. See [Troubleshooting](./troubleshooting) for the
+full remediation matrix.
+
+The hourly background sanity check ([health-check job](./watch-state)
+runs the same probe and logs a single WARNING with the verdict if
+anything degrades.

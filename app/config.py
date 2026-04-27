@@ -32,10 +32,10 @@ class Settings(BaseSettings):
     base_url: str = "http://localhost:8000"
     port: int = 8000
 
-    # -------- LLM --------
+    # -------- LLM (chat completions) --------
     # "none" disables LLM features entirely (faster, no network). The default
     # on the public instance is "claude"; self-hosters can point at Ollama.
-    llm_provider: Literal["ollama", "claude", "openai", "none"] = "ollama"
+    llm_provider: Literal["ollama", "claude", "openai", "openrouter", "none"] = "ollama"
 
     # Ollama
     ollama_base_url: str = "http://ollama:11434"
@@ -45,9 +45,28 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     claude_model: str = "claude-haiku-4-5"  # cheap + fast; bump to sonnet for quality
 
-    # OpenAI — used when llm_provider="openai"
+    # OpenAI — used when llm_provider="openai" or as the embedding provider
+    # (see embedding_provider below). Same key, two possible roles.
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
+
+    # OpenRouter — used when llm_provider="openrouter"
+    # One key → ~200 chat models (Claude, GPT, Llama, Gemini, Qwen, Mixtral…).
+    # OpenRouter does NOT proxy embeddings, only chat completions.
+    openrouter_api_key: str = ""
+    openrouter_model: str = "anthropic/claude-3.5-haiku"
+
+    # -------- Embeddings (vector similarity) --------
+    # Two model workers — one for chat (above), one for embeddings (here).
+    # Default "auto" follows llm_provider with this mapping:
+    #   ollama     → Ollama embeddings (nomic-embed-text by default)
+    #   claude     → local sentence-transformers (Anthropic ships no embeddings)
+    #   openai     → OpenAI text-embedding-3-small
+    #   openrouter → local sentence-transformers (OpenRouter ships no embeddings)
+    #   none       → null (similarity rail gracefully empty)
+    # Set explicitly to override. The most common reason: chat on Claude or
+    # OpenRouter, embeddings on OpenAI for top-tier 1536d quality.
+    embedding_provider: Literal["auto", "openai", "ollama", "local", "none"] = "auto"
 
     # -------- Sync --------
     # Default cadence for the user-sync sweep. Adaptive logic (see

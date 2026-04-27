@@ -98,7 +98,7 @@ async def feeds(
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    """Return the 22-feed personalized response. Always succeeds."""
+    """Return the 10-feed personalized response. Always succeeds."""
     import json
 
     user: User | None = None

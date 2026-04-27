@@ -282,6 +282,47 @@ class OpenAIProvider(LLMProvider):
             self._client = None
 
 
+# ------------------------------ OpenRouter ----------------------------
+
+
+class OpenRouterProvider(OpenAIProvider):
+    """OpenRouter — one key, ~200 chat models (Claude, GPT, Llama, Gemini…).
+
+    OpenRouter exposes the OpenAI Chat Completions API at a different URL,
+    so we just subclass OpenAIProvider and swap the endpoint + headers.
+    Requires OPENROUTER_API_KEY.
+
+    Note: OpenRouter does NOT proxy embeddings — it's chat-only. When
+    LLM_PROVIDER=openrouter, the embeddings layer falls back to local
+    sentence-transformers (matching the Claude path).
+    """
+
+    name = "openrouter"
+    _API = "https://openrouter.ai/api/v1/chat/completions"
+
+    def __init__(self, api_key: str | None = None, model: str | None = None) -> None:
+        settings = get_settings()
+        self.api_key = api_key or settings.openrouter_api_key
+        self.model = model or settings.openrouter_model
+        self._client: httpx.AsyncClient | None = None
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            settings = get_settings()
+            # OpenRouter uses HTTP-Referer + X-Title for their dashboard +
+            # to bump apps up the discovery ranking. Both optional.
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=5.0),
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "content-type": "application/json",
+                    "HTTP-Referer": settings.base_url,
+                    "X-Title": "Reclio",
+                },
+            )
+        return self._client
+
+
 # ------------------------------ Service layer -------------------------
 
 
@@ -837,6 +878,14 @@ def _build_provider() -> LLMProvider:
             )
             return NullProvider()
         return OpenAIProvider()
+    if provider == "openrouter":
+        if not settings.openrouter_api_key:
+            logger.warning(
+                "LLM_PROVIDER=openrouter but OPENROUTER_API_KEY is empty; "
+                "falling back to NullProvider."
+            )
+            return NullProvider()
+        return OpenRouterProvider()
     # default
     return OllamaProvider()
 

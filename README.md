@@ -20,19 +20,27 @@ _Connect your Trakt. Copy your addon URL. Paste into Chillio. Done._
 
 ## What it is
 
-Reclio reads your Trakt watch history and turns it into 22 personalized
-rows for [Chillio](https://chillio.app) — Because You Watched, hidden
-gems, director spotlights, decade throwbacks, trending, the lot.
+Reclio reads your Trakt watch history and turns it into 10 personalized
+rows for [Chillio](https://chillio.app) — *Recommended For You*,
+*Because You Watched*, *Trending*, *Top Genre You'll Love*, and
+*Hidden Gems*, each split into a movies + shows pair.
+
+Behind those rows: **Recombee** collaborative filtering, **vector
+embeddings** for semantic similarity, a **watch-state machine** that
+learns from incomplete watches, an LLM-driven **conversational
+chat** ("stop showing me horror" → it actually does), and a
+recency-weighted **personality blurb** that gently roasts your taste.
 
 Use the public instance at [**reclio.p0xl.com**](https://reclio.p0xl.com)
 or self-host with one `docker compose up`.
 
 ## What you get
 
-- **22 personalized rows** that learn from what you watch
-- **Trakt-native** — watches, ratings, watchlist all factor in
-- **Hidden gems and BYW rows** with LLM-generated titles
-- **Adaptive sync** — heavy users refresh faster, idle users slower
+- **10 personalized rows** (5 movie + 5 show) that learn from what you watch *and* what you abandon
+- **Trakt-native** — watches, ratings, watchlist, *and incomplete starts* all factor in
+- **Ask Reclio** — floating chat bubble that can answer "why am I seeing X" and act on "stop showing me Y"
+- **Personality card** — iOS Health-style donut chart of your top genres + an LLM-written one-line roast
+- **Adaptive sync** — heavy users refresh hourly, dormant users weekly, ~80% less Trakt API traffic than v1.4
 - **Always works** — every external service can fail and you still get recs
 
 ---
@@ -43,7 +51,7 @@ or self-host with one `docker compose up`.
 2. **Connect with Trakt** and authorize
 3. Tap **Copy** on your personal addon URL
 4. In Chillio: **Settings → ChillLink Servers → Add Server** → paste → Save
-5. Pull-to-refresh the home tab. 22 rows appear.
+5. Pull-to-refresh the home tab. The 10 rows appear.
 
 First-time users see mostly generic feeds for ~2 minutes while the
 taste profile builds, then refresh.
@@ -75,8 +83,10 @@ Full docs at **[anrew3.github.io/Reclio](https://anrew3.github.io/Reclio/)**
 | --- | --- |
 | [Setup](https://anrew3.github.io/Reclio/setup) | Docker Compose + local dev + getting API keys |
 | [Configuration](https://anrew3.github.io/Reclio/configuration) | Every env var, every default |
-| [Model integrations](https://anrew3.github.io/Reclio/model-integrations) | Ollama · Claude · OpenAI |
+| [Model integrations](https://anrew3.github.io/Reclio/model-integrations) | Ollama · Claude · OpenAI · OpenRouter |
+| [Embeddings](https://anrew3.github.io/Reclio/embeddings) | What they are, why we use them, provider tradeoffs |
 | [Recombee](https://anrew3.github.io/Reclio/recombee) | Collaborative-filtering deep-dive |
+| [Watch-state machine](https://anrew3.github.io/Reclio/watch-state) | How Reclio learns from incomplete watches |
 | [API reference](https://anrew3.github.io/Reclio/api-reference) | `/manifest`, `/feeds`, `/admin/*` |
 | [Adaptive sync](https://anrew3.github.io/Reclio/adaptive-sync) | How sync cadence auto-tunes |
 | [Caddy vs Traefik](https://anrew3.github.io/Reclio/caddy-vs-traefik) | Reverse-proxy trade-offs |

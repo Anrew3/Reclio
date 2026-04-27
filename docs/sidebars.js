@@ -14,13 +14,19 @@ const sidebars = {
       type: 'category',
       label: 'Integrations',
       collapsed: false,
-      items: ['model-integrations', 'recombee'],
+      items: ['model-integrations', 'embeddings', 'recombee'],
     },
     {
       type: 'category',
       label: 'Reference',
       collapsed: false,
-      items: ['api-reference', 'adaptive-sync', 'caddy-vs-traefik', 'troubleshooting'],
+      items: [
+        'api-reference',
+        'adaptive-sync',
+        'watch-state',
+        'caddy-vs-traefik',
+        'troubleshooting',
+      ],
     },
   ],
 };

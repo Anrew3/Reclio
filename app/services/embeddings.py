@@ -206,8 +206,41 @@ _provider: EmbeddingProvider | None = None
 
 
 def _build_provider() -> EmbeddingProvider:
-    """Pick a provider based on LLM_PROVIDER. Same env var as the LLM."""
+    """Pick an embedding provider.
+
+    Two model workers — one for chat (LLM_PROVIDER), one for embeddings
+    (this function). Default `EMBEDDING_PROVIDER=auto` follows the chat
+    provider with sensible mappings:
+
+      LLM_PROVIDER=ollama     → Ollama embeddings (nomic-embed-text)
+      LLM_PROVIDER=openai     → OpenAI text-embedding-3-small (1536d)
+      LLM_PROVIDER=claude     → local sentence-transformers (Anthropic ships none)
+      LLM_PROVIDER=openrouter → local sentence-transformers (OpenRouter ships none)
+      LLM_PROVIDER=none       → NullProvider
+
+    Set EMBEDDING_PROVIDER explicitly to override. Most useful for
+    "chat on Claude/OpenRouter, embeddings on OpenAI for top-tier 1536d
+    quality" — set EMBEDDING_PROVIDER=openai + OPENAI_API_KEY.
+    """
     settings = get_settings()
+    explicit = settings.embedding_provider
+
+    if explicit == "none":
+        return NullEmbeddingProvider()
+    if explicit == "openai":
+        if not settings.openai_api_key:
+            logger.warning(
+                "embeddings: EMBEDDING_PROVIDER=openai but OPENAI_API_KEY missing; "
+                "falling back to local sentence-transformers."
+            )
+            return LocalEmbeddingProvider()
+        return OpenAIEmbeddingProvider()
+    if explicit == "ollama":
+        return OllamaEmbeddingProvider()
+    if explicit == "local":
+        return LocalEmbeddingProvider()
+
+    # explicit == "auto" → follow the chat provider
     llm = settings.llm_provider
     if llm == "none":
         return NullEmbeddingProvider()
@@ -221,7 +254,7 @@ def _build_provider() -> EmbeddingProvider:
             )
             return LocalEmbeddingProvider()
         return OpenAIEmbeddingProvider()
-    # claude (and unknown) → local sentence-transformers
+    # claude / openrouter / unknown → local sentence-transformers
     return LocalEmbeddingProvider()
 
 

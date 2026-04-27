@@ -154,7 +154,7 @@ async def build_feeds(
     byw_titles: dict[str, str] | None = None,
     prefs: UserPreferences | None = None,
 ) -> list[dict[str, Any]]:
-    """Build the 22-feed personalized response.
+    """Build the 10-feed personalized response.
 
     Args:
         session: DB session (reserved for future lookups)
