@@ -17,23 +17,47 @@ logger = logging.getLogger(__name__)
 
 
 def _safe_import():
+    """Import the Recombee SDK with version tolerance.
+
+    The exception class names changed between 4.x and 5.x:
+      4.x exposed ApiException + ResponseException
+      5.x renamed/dropped ApiException; ResponseException stayed
+    Pinning a single version isn't enough — pip can resolve to a 5.x in
+    fresh environments. Splitting the import lets the core SDK load even
+    when only one of the exception classes exists; missing classes fall
+    back to plain Exception (the catch-all already coerces both anyway).
+    """
+    # Step 1: hard requirement — the client + request modules
     try:
         from recombee_api_client.api_client import RecombeeClient
         from recombee_api_client import api_requests as rq
-        from recombee_api_client.exceptions import (
-            ApiException,
-            ResponseException,
-        )
-
-        try:
-            from recombee_api_client.api_client import Region
-        except ImportError:
-            Region = None
-
-        return RecombeeClient, Region, rq, ApiException, ResponseException
     except Exception as exc:  # noqa: BLE001
-        logger.warning("Recombee SDK unavailable: %s", exc)
+        logger.warning("Recombee SDK core unavailable: %s", exc)
         return None, None, None, Exception, Exception
+
+    # Step 2: best-effort exception classes — fall back to Exception when
+    # the SDK rev we got doesn't expose the exact name we want.
+    try:
+        from recombee_api_client.exceptions import ApiException
+    except ImportError:
+        try:
+            # 5.x typically still exposes ApiTimeoutException; close enough
+            # semantically to keep distinct error logging.
+            from recombee_api_client.exceptions import ApiTimeoutException as ApiException
+        except ImportError:
+            ApiException = Exception
+    try:
+        from recombee_api_client.exceptions import ResponseException
+    except ImportError:
+        ResponseException = Exception
+
+    # Step 3: optional Region enum — older SDKs don't expose it
+    try:
+        from recombee_api_client.api_client import Region
+    except ImportError:
+        Region = None
+
+    return RecombeeClient, Region, rq, ApiException, ResponseException
 
 
 def _resolve_region(Region, name: str):

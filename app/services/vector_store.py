@@ -10,6 +10,13 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
+# Chromadb 0.5 ships a posthog telemetry client whose `capture()` signature
+# is incompatible with current posthog releases — every call logs an ERROR
+# even though we set anonymized_telemetry=False. The errors are harmless
+# (telemetry is disabled regardless) but they pollute every log scan.
+# Silence the posthog logger entirely.
+logging.getLogger("chromadb.telemetry.product.posthog").setLevel(logging.CRITICAL)
+
 _COLLECTION_NAME = "content_catalog"
 
 _client = None
