@@ -521,22 +521,35 @@ p { margin: 0; }
   filter: drop-shadow(0 4px 12px rgba(0,0,0,0.35));
 }
 
-/* Slice draw-in animation: each slice fades and grows from 0
-   stroke. Staggered via nth-of-type so the wheel "fills" left-to-right. */
+/* Slice draw-in: opacity-only fade. Earlier versions also animated
+   `transform: scale(...)` which conflicted with the SVG inline
+   `transform="rotate(-90 50 50)"` attribute on every browser that
+   honors transform-origin in SVG coordinate space differently
+   (Safari/iOS especially). The slice would flash on, then snap
+   away when the animation ended and the inline rotate reapplied.
+   Keep it simple: fade in, stay visible, both fill modes set. */
 .personality-donut-slice {
-  animation: donut-in 700ms cubic-bezier(0.32, 0.72, 0.27, 1) backwards;
-  transform-origin: 50% 50%;
+  opacity: 0;
+  animation: donut-in 600ms cubic-bezier(0.32, 0.72, 0.27, 1) forwards;
 }
-.personality-donut-slice:nth-of-type(2) { animation-delay: 80ms; }
-.personality-donut-slice:nth-of-type(3) { animation-delay: 160ms; }
-.personality-donut-slice:nth-of-type(4) { animation-delay: 240ms; }
-.personality-donut-slice:nth-of-type(5) { animation-delay: 320ms; }
-.personality-donut-slice:nth-of-type(6) { animation-delay: 400ms; }
-.personality-donut-slice:nth-of-type(7) { animation-delay: 480ms; }
+.personality-donut-slice:nth-of-type(2) { animation-delay: 60ms; }
+.personality-donut-slice:nth-of-type(3) { animation-delay: 120ms; }
+.personality-donut-slice:nth-of-type(4) { animation-delay: 180ms; }
+.personality-donut-slice:nth-of-type(5) { animation-delay: 240ms; }
+.personality-donut-slice:nth-of-type(6) { animation-delay: 300ms; }
+.personality-donut-slice:nth-of-type(7) { animation-delay: 360ms; }
 
 @keyframes donut-in {
-  from { opacity: 0; transform: scale(0.85); }
-  to   { opacity: 1; transform: scale(1); }
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* Honor reduced-motion preferences: skip the stagger entirely */
+@media (prefers-reduced-motion: reduce) {
+  .personality-donut-slice {
+    opacity: 1;
+    animation: none;
+  }
 }
 
 .personality-donut-center {

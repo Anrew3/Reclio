@@ -203,6 +203,18 @@ async def run_content_sync() -> dict[str, int]:
         "fetched": 0, "new": 0, "errors": 0,
         "recombee_sent": 0, "recombee_succeeded": 0, "recombee_failed": 0,
     }
+    # Self-heal Recombee schema: if the boot-time `initialize_schema()`
+    # call failed (e.g. SDK was disabled at boot), re-run it here. The
+    # underlying `_properties_initialized` flag prevents redundant calls
+    # once it actually succeeds.
+    try:
+        recombee = get_recombee()
+        if recombee.available and not recombee._properties_initialized:  # noqa: SLF001
+            await recombee.initialize_schema()
+            logger.info("content_sync: Recombee schema init succeeded")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("content_sync: Recombee schema init retry failed: %s", exc)
+
     try:
         candidates = await _gather_candidate_items()
         stats["fetched"] = len(candidates)

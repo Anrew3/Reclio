@@ -24,6 +24,7 @@ from app.jobs.health_check import (
     get_recent_history,
     run_health_checks,
 )
+from app.jobs.selftest import run_selftest
 from app.jobs.user_sync import sync_one_user
 from app.models.account import Account
 from app.models.content import ContentCatalog
@@ -482,3 +483,31 @@ async def admin_health_run(
     _require_admin(x_admin_token)
     background.add_task(run_health_checks)
     return {"status": "scheduled", "job": "health_check"}
+
+
+@router.get("/selftest")
+async def admin_selftest(
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Comprehensive end-to-end probe of every system + subsystem.
+
+    Tests, in parallel:
+      external — database, Trakt, TMDB, Recombee, LLM, embeddings
+      internal — similarity service, watch-state state machine,
+                 feed builder, scheduler
+      config   — required env vars + base_url scheme
+      data     — table counts + cross-table consistency
+
+    Each probe returns a uniform shape:
+      {name, category, status, elapsed_ms, detail, error, remediation}
+
+    `status` ∈ {pass, warn, fail, skip}. `remediation` is plain-English
+    when status != pass.
+
+    Top-level `overall` rolls up: any fail → fail, any warn → warn,
+    else pass. Total wall time typically 2–8 seconds depending on
+    LLM provider latency. Safe to run repeatedly (write probes use
+    stable idempotent ids).
+    """
+    _require_admin(x_admin_token)
+    return await run_selftest()
