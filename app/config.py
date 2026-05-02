@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     user_sync_default_interval_hours: int = 8
     user_sync_hot_interval_hours: int = 4  # heavy users
     user_sync_cold_interval_hours: int = 24  # dormant users
+    # Dormant bucket — users with no Trakt activity in 30+ days. The
+    # cheap-poll path still fires (one /sync/last_activities call) so
+    # we notice quickly when they re-engage. Default 168h = weekly.
+    user_sync_dormant_interval_hours: int = 168
     # Request rates (hits / 7 days) that promote a user between bands.
     user_sync_hot_threshold_per_week: int = 14  # ~2/day
     user_sync_cold_threshold_per_week: int = 3  # fewer than ~3/week
