@@ -13,11 +13,13 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import session_scope
+from app.models.content import ContentCatalog
 from app.models.taste_cache import TasteCache
 from app.models.user import User
 from app.services.activity import _flatten_activities
 from app.services.recombee import get_recombee
 from app.services.taste_profile import build_taste_profile
+from app.services.tmdb import get_tmdb
 from app.services.trakt import get_trakt
 from app.utils.crypto import decrypt
 
@@ -54,6 +56,148 @@ def _parse_trakt_ts(iso_str: str | None) -> datetime | None:
         return datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
     except ValueError:
         return None
+
+
+async def _enrich_recombee_for_history(
+    item_ids: set[str],
+) -> int:
+    """Ensure every Trakt-derived item in `item_ids` exists in Recombee
+    *with full properties* (title, overview, genres, year, vote_average,
+    cast, director, media_type, popularity).
+
+    Why: Recombee's interaction calls (AddDetailView/AddRating/AddBookmark)
+    accept `cascade_create=True` which auto-creates the item if missing,
+    but ONLY with the bare ID — no properties at all. The Recombee
+    dashboard then shows an item like `movie_27205` with empty columns.
+    By calling SetItemValues *first* with full TMDB metadata, the
+    dashboard surfaces titles/genres/etc and the item-to-item
+    recommendations work much better (they need actual properties).
+
+    Idempotent + cheap: skips items already present in our local
+    ContentCatalog (those went through content_sync and have full
+    properties already in Recombee). Only fetches TMDB metadata for
+    items we've never seen.
+
+    Returns the number of items that got enriched in this pass.
+    """
+    recombee = get_recombee()
+    if not recombee.available or not item_ids:
+        return 0
+
+    # Skip items we've already cataloged — content_sync handles those.
+    async with session_scope() as session:
+        result = await session.execute(
+            select(ContentCatalog.tmdb_id).where(ContentCatalog.tmdb_id.in_(item_ids))
+        )
+        already_cataloged = {row for row in result.scalars()}
+    missing = sorted(item_ids - already_cataloged)
+    if not missing:
+        return 0
+
+    logger.info(
+        "user_sync: enriching %d new Recombee items with TMDB metadata "
+        "(%d already in catalog)",
+        len(missing), len(already_cataloged),
+    )
+
+    tmdb = get_tmdb()
+    sem = asyncio.Semaphore(6)  # respect TMDB rate limits
+
+    async def _one(item_id: str) -> tuple[str, dict[str, Any]] | None:
+        async with sem:
+            try:
+                if item_id.startswith("movie_"):
+                    media_type = "movie"
+                    tmdb_id = int(item_id.split("_", 1)[1])
+                    full = await tmdb.get_movie(tmdb_id)
+                elif item_id.startswith("tv_"):
+                    media_type = "tv"
+                    tmdb_id = int(item_id.split("_", 1)[1])
+                    full = await tmdb.get_show(tmdb_id)
+                else:
+                    return None
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("enrich: TMDB fetch failed for %s: %s", item_id, exc)
+                return None
+
+            if not full:
+                return None
+
+            title = full.get("title") or full.get("name") or ""
+            overview = full.get("overview")
+            genres = full.get("genres") or []
+            credits = full.get("credits") or {}
+            cast = (credits.get("cast") or [])[:5]
+            crew = credits.get("crew") or []
+            director = None
+            if media_type == "movie":
+                for c in crew:
+                    if c.get("job") == "Director":
+                        director = c.get("name")
+                        break
+            date_field = (full.get("release_date") if media_type == "movie"
+                          else full.get("first_air_date"))
+            year = None
+            if date_field:
+                try:
+                    year = int(date_field.split("-")[0])
+                except (ValueError, IndexError):
+                    year = None
+
+            props = {
+                "title": title,
+                "overview": overview,
+                "genres": [g.get("name") for g in genres if g.get("name")],
+                "year": year,
+                "vote_average": float(full.get("vote_average") or 0.0),
+                "popularity": float(full.get("popularity") or 0.0),
+                "media_type": media_type,
+                "cast": [c.get("name") for c in cast if c.get("name")],
+                "director": director,
+            }
+            return item_id, props
+
+    enriched = await asyncio.gather(*[_one(i) for i in missing])
+    upsert_pairs = [pair for pair in enriched if pair is not None]
+    if not upsert_pairs:
+        return 0
+
+    # Reuse the same batch upsert path content_sync uses — already
+    # handles per-item failure tracking + cascade_create.
+    push_stats = await recombee.upsert_items_batch(upsert_pairs)
+    failed = push_stats.get("failed_ids") or set()
+
+    # Persist as catalog rows too, so subsequent syncs skip the TMDB fetch.
+    rows: list[ContentCatalog] = []
+    now = datetime.utcnow()
+    for item_id, props in upsert_pairs:
+        if item_id in failed:
+            continue
+        rows.append(ContentCatalog(
+            tmdb_id=item_id,
+            media_type=props["media_type"],
+            title=props["title"],
+            overview=props["overview"],
+            genres=[{"name": n} for n in (props["genres"] or [])],
+            cast=[{"name": n} for n in (props["cast"] or [])],
+            director=props["director"],
+            year=props["year"],
+            vote_average=props["vote_average"],
+            popularity=props["popularity"],
+            embedding_stored=False,
+            recombee_synced=True,
+            last_updated=now,
+        ))
+    if rows:
+        async with session_scope() as session:
+            session.add_all(rows)
+
+    logger.info(
+        "user_sync: enriched %d Recombee items with full properties "
+        "(%d failed during push)",
+        len(rows), len(failed),
+    )
+    return len(rows)
 
 
 async def _push_interactions(
@@ -163,6 +307,20 @@ async def _push_interactions(
         })
 
     if interactions:
+        # Step 1: enrich Recombee with full item properties for every
+        # distinct item the user has touched. This MUST run before
+        # pushing the interactions themselves — otherwise cascade_create
+        # makes properties-less item shells that show as bare IDs in
+        # the Recombee dashboard.
+        distinct_item_ids = {i["item_id"] for i in interactions}
+        try:
+            await _enrich_recombee_for_history(distinct_item_ids)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "user_sync: history enrichment failed for %s: %s "
+                "(interactions still get pushed)", user_id, exc,
+            )
+
         logger.info(
             "user_sync: pushing %d interactions (%d views, %d ratings, %d bookmarks) for %s",
             len(interactions),

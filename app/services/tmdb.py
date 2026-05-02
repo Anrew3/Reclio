@@ -179,20 +179,20 @@ class TMDBClient:
         data = await self._get("/tv/on_the_air")
         return data.get("results", []) or []
 
-    async def get_top_rated_movies(self) -> list[dict]:
-        data = await self._get("/movie/top_rated")
+    async def get_top_rated_movies(self, page: int = 1) -> list[dict]:
+        data = await self._get("/movie/top_rated", params={"page": page})
         return data.get("results", []) or []
 
-    async def get_top_rated_shows(self) -> list[dict]:
-        data = await self._get("/tv/top_rated")
+    async def get_top_rated_shows(self, page: int = 1) -> list[dict]:
+        data = await self._get("/tv/top_rated", params={"page": page})
         return data.get("results", []) or []
 
-    async def get_popular_movies(self) -> list[dict]:
-        data = await self._get("/movie/popular")
+    async def get_popular_movies(self, page: int = 1) -> list[dict]:
+        data = await self._get("/movie/popular", params={"page": page})
         return data.get("results", []) or []
 
-    async def get_popular_shows(self) -> list[dict]:
-        data = await self._get("/tv/popular")
+    async def get_popular_shows(self, page: int = 1) -> list[dict]:
+        data = await self._get("/tv/popular", params={"page": page})
         return data.get("results", []) or []
 
     async def get_genre_list_movies(self) -> list[dict]:

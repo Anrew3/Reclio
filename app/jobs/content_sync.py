@@ -25,8 +25,17 @@ from app.services.vector_store import upsert as vs_upsert
 
 logger = logging.getLogger(__name__)
 
-# Per-run caps to keep the job's wall time bounded on low-traffic deploys
-_MAX_NEW_PER_RUN = 300
+# Per-run caps. Bumped from v1.6.5's 300 → 1000 to let initial seeding
+# fully populate. With pagination across the discovery endpoints, a fresh
+# install can now grow the catalog to ~600-800 items in a single sync.
+_MAX_NEW_PER_RUN = 1000
+
+# How many pages of each pageable discovery endpoint to fetch. 5 pages × 20
+# items/page = 100 per endpoint. Across popular + top_rated for movies +
+# shows that's 400 unique-ish items just from those four endpoints, plus
+# the ~20 each from trending/now_playing/on_the_air. Net ~500-600 unique
+# titles per run before dedup against the existing catalog.
+_DISCOVERY_PAGES = 5
 
 
 def _embedding_source_hash(text: str) -> str:
@@ -50,21 +59,38 @@ def _pack_embedding(vec: list[float]) -> bytes:
 
 
 async def _gather_candidate_items() -> dict[str, dict]:
-    """Fetch TMDB discovery endpoints. Returns {tmdb_id_key: tmdb_summary}."""
+    """Fetch TMDB discovery endpoints. Returns {tmdb_id_key: tmdb_summary}.
+
+    Paginated across popular + top_rated for both media types
+    (_DISCOVERY_PAGES = 5). The trending/now_playing/on_the_air endpoints
+    only have one page worth of useful results so they stay single-page.
+    """
     tmdb = get_tmdb()
-    results = await asyncio.gather(
-        tmdb.get_popular_movies(),
-        tmdb.get_top_rated_movies(),
+
+    # Build the request fan-out. Pageable endpoints get _DISCOVERY_PAGES
+    # parallel calls; single-page endpoints stay as-is.
+    movie_calls: list[Any] = [
+        tmdb.get_popular_movies(page=p) for p in range(1, _DISCOVERY_PAGES + 1)
+    ] + [
+        tmdb.get_top_rated_movies(page=p) for p in range(1, _DISCOVERY_PAGES + 1)
+    ] + [
         tmdb.get_trending_movies(),
         tmdb.get_now_playing(),
-        tmdb.get_popular_shows(),
-        tmdb.get_top_rated_shows(),
+    ]
+    show_calls: list[Any] = [
+        tmdb.get_popular_shows(page=p) for p in range(1, _DISCOVERY_PAGES + 1)
+    ] + [
+        tmdb.get_top_rated_shows(page=p) for p in range(1, _DISCOVERY_PAGES + 1)
+    ] + [
         tmdb.get_trending_shows(),
         tmdb.get_on_the_air(),
-        return_exceptions=True,
+    ]
+
+    all_results = await asyncio.gather(
+        *movie_calls, *show_calls, return_exceptions=True,
     )
-    movie_results = [r for r in results[:4] if isinstance(r, list)]
-    show_results = [r for r in results[4:] if isinstance(r, list)]
+    movie_results = [r for r in all_results[: len(movie_calls)] if isinstance(r, list)]
+    show_results = [r for r in all_results[len(movie_calls):] if isinstance(r, list)]
 
     bucket: dict[str, dict] = {}
     for lst in movie_results:
@@ -81,6 +107,14 @@ async def _gather_candidate_items() -> dict[str, dict]:
                 key = f"tv_{tmdb_id}"
                 if key not in bucket:
                     bucket[key] = {"media_type": "tv", "summary": item}
+    logger.info(
+        "content_sync: discovery returned %d unique candidate items "
+        "(%d movies, %d shows) across %d TMDB calls",
+        len(bucket),
+        sum(1 for v in bucket.values() if v["media_type"] == "movie"),
+        sum(1 for v in bucket.values() if v["media_type"] == "tv"),
+        len(movie_calls) + len(show_calls),
+    )
     return bucket
 
 
