@@ -440,11 +440,20 @@ async def _t_feed_builder() -> ProbeResult:
             show_genre_scores = {"18": 0.9, "80": 0.7, "10765": 0.6}
 
         class _P:
+            # Mirror every UserPreferences field feed_builder reads.
+            # Update this when new pref fields ship — selftest catches
+            # missing-attribute regressions early.
             excluded_movie_genres = [27]
             excluded_show_genres = [10764]
             family_safe = False
             era_preference = 50
+            pacing_preference = 50
+            runtime_preference = 50
             discovery_level = 50
+            boosted_keywords: list[str] = []
+            excluded_keywords: list[str] = []
+            blocked_titles: list[dict] = []
+            favorite_moods: list[str] = []
 
         feeds = await build_feeds(None, _U(), _T(), prefs=_P())
         # Should be exactly 10 (5 movie + 5 show)
