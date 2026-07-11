@@ -1,8 +1,8 @@
 """Watch-state machine — turns /sync/playback into structured signal.
 
 Runs inside sync_one_user(), between the interactions push and the
-Recombee fetch. Reuses the same per-user lock + adaptive cadence — no
-new scheduled job, no new cron entry.
+recommendation fetch. Reuses the same per-user lock + adaptive cadence —
+no new scheduled job, no new cron entry.
 
 The state machine in `evaluate_watch_state` walks every open
 WatchAttempt for the user and applies the rules from V1.5_PLAN.txt
@@ -22,9 +22,9 @@ section 2:
     -  2+ seasons watched + 14d+ idle    → abandoned_lost_interest (positive)
     -  mid-season pause                  → stays in_progress
 
-When a verdict flips, we push the corresponding signal to Recombee +
-optionally bump the taste cache, then set feedback_pushed=True so
-re-running the evaluator never double-counts.
+When a verdict flips, we record the corresponding signal in the
+recommendation engine + optionally bump the taste cache, then set
+feedback_pushed=True so re-running the evaluator never double-counts.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.taste_cache import TasteCache
 from app.models.user import User
 from app.models.watch_attempt import WatchAttempt
-from app.services.recombee import get_recombee
+from app.services import recommender
 from app.services.trakt import get_trakt
 
 logger = logging.getLogger(__name__)
@@ -244,9 +244,9 @@ def _decide_episode(att: WatchAttempt, history_recent: list[dict],
     return None
 
 
-# Recombee rating amplitudes per verdict. Magnitudes are in the [-1, 1]
-# range Recombee expects. None = no Recombee signal for this verdict.
-_RECOMBEE_RATING: dict[str, float | None] = {
+# Engine signal amplitudes per verdict, in [-1, 1].
+# None = no signal for this verdict.
+_VERDICT_RATING: dict[str, float | None] = {
     "completed":               +0.5,
     "abandoned_sleep":         -0.2,
     "abandoned_bounce":        -0.7,
@@ -258,12 +258,8 @@ _RECOMBEE_RATING: dict[str, float | None] = {
 
 
 async def _push_signal(att: WatchAttempt) -> bool:
-    """Push the Recombee signal for the verdict. Returns True on success."""
-    recombee = get_recombee()
-    if not recombee.available:
-        return True  # Recombee disabled — treat as "pushed" so we don't loop
-
-    rating = _RECOMBEE_RATING.get(att.status)
+    """Record the engine signal for the verdict. Returns True on success."""
+    rating = _VERDICT_RATING.get(att.status)
     # Show-level S1E1 bounce gets the loudest signal.
     if att.status == "abandoned_bounce" and att.kind == "episode" \
             and att.season_number == 1 and att.episode_number == 1:
@@ -271,7 +267,7 @@ async def _push_signal(att: WatchAttempt) -> bool:
     if rating is None:
         return True
 
-    # Build the canonical Recombee item id. Show-level signals (lost_interest,
+    # Build the canonical catalog item id. Show-level signals (lost_interest,
     # S1E1 bounce, episode completion) attach to the SHOW. Movie signals attach
     # to the movie.
     if att.kind == "movie" and att.movie_tmdb_id:
@@ -281,18 +277,7 @@ async def _push_signal(att: WatchAttempt) -> bool:
     else:
         return True
 
-    try:
-        rq = recombee._rq  # noqa: SLF001
-        import asyncio
-        await asyncio.to_thread(
-            recombee._client.send,  # noqa: SLF001
-            rq.AddRating(att.user_id, item_id, rating, cascade_create=True),
-        )
-        return True
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("watch_state: Recombee push failed for %s/%s: %s",
-                     att.user_id, item_id, exc)
-        return False
+    return await recommender.push_signal(att.user_id, item_id, rating)
 
 
 async def evaluate_watch_state(
@@ -410,15 +395,10 @@ async def evaluate_watch_state(
         # so the negative signal doesn't equal a true "didn't even
         # finish" S1E1 bounce.
         att.status = "abandoned_bounce"
-        recombee = get_recombee()
-        if recombee.available and att.show_tmdb_id:
+        if att.show_tmdb_id:
             try:
-                import asyncio
-                rq = recombee._rq  # noqa: SLF001
-                await asyncio.to_thread(
-                    recombee._client.send,  # noqa: SLF001
-                    rq.AddRating(att.user_id, f"tv_{att.show_tmdb_id}", -0.4,
-                                 cascade_create=True),
+                await recommender.push_signal(
+                    att.user_id, f"tv_{att.show_tmdb_id}", -0.4,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.debug("watch_state: E2-followup push failed: %s", exc)

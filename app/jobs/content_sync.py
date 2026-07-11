@@ -1,9 +1,9 @@
-"""Daily content sync: TMDB → embeddings → ChromaDB + Recombee + catalog table.
+"""Daily content sync: TMDB → embeddings → catalog table.
 
-v1.5: also persists embedding bytes + dim + model + source_hash to the
-content_catalog row so the new SQLite-backed similarity service can
-do cosine queries without re-embedding. ChromaDB upsert is preserved
-for backward compat.
+Embedding bytes + dim + model + source_hash persist on the
+content_catalog row; the similarity service serves cosine queries
+straight from those columns. In recombee (legacy) mode, items are
+also mirrored to the Recombee SaaS.
 """
 
 from __future__ import annotations
@@ -16,12 +16,12 @@ from typing import Any, Iterable
 
 from sqlalchemy import select
 
+from app.config import get_settings
 from app.database import session_scope
 from app.models.content import ContentCatalog
+from app.services import similarity
 from app.services.embeddings import build_embedding_text, embed_text, get_embeddings_provider
-from app.services.recombee import get_recombee
 from app.services.tmdb import get_tmdb
-from app.services.vector_store import upsert as vs_upsert
 
 logger = logging.getLogger(__name__)
 
@@ -58,14 +58,50 @@ def _pack_embedding(vec: list[float]) -> bytes:
         return struct.pack(f"<{len(vec)}f", *vec)
 
 
+async def _top_user_genres(limit: int = 8) -> tuple[list[int], list[int]]:
+    """Union of the top taste-profile genres across all users.
+
+    Feeds the genre-targeted discover sweep below so the catalog grows
+    *around what the instance's users actually watch*, not just around
+    TMDB's global popular list. Returns (movie_genre_ids, tv_genre_ids).
+    """
+    from app.models.taste_cache import TasteCache
+
+    movie_scores: dict[int, float] = {}
+    show_scores: dict[int, float] = {}
+    try:
+        async with session_scope() as session:
+            result = await session.execute(
+                select(TasteCache.movie_genre_scores, TasteCache.show_genre_scores)
+            )
+            for m_scores, s_scores in result.all():
+                for raw, bag in ((m_scores, movie_scores), (s_scores, show_scores)):
+                    for gid, score in (raw or {}).items():
+                        try:
+                            bag[int(gid)] = bag.get(int(gid), 0.0) + float(score)
+                        except (TypeError, ValueError):
+                            continue
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("content_sync: taste genre scan failed: %s", exc)
+
+    def _top(bag: dict[int, float]) -> list[int]:
+        return [g for g, _ in sorted(bag.items(), key=lambda x: x[1], reverse=True)[:limit]]
+
+    return _top(movie_scores), _top(show_scores)
+
+
 async def _gather_candidate_items() -> dict[str, dict]:
     """Fetch TMDB discovery endpoints. Returns {tmdb_id_key: tmdb_summary}.
 
     Paginated across popular + top_rated for both media types
-    (_DISCOVERY_PAGES = 5). The trending/now_playing/on_the_air endpoints
-    only have one page worth of useful results so they stay single-page.
+    (_DISCOVERY_PAGES = 5), plus genre-targeted /discover sweeps for the
+    instance's top user genres — so the recommendable pool is deep where
+    users' taste actually lives. The trending/now_playing/on_the_air
+    endpoints only have one page worth of useful results so they stay
+    single-page.
     """
     tmdb = get_tmdb()
+    top_movie_genres, top_show_genres = await _top_user_genres()
 
     # Build the request fan-out. Pageable endpoints get _DISCOVERY_PAGES
     # parallel calls; single-page endpoints stay as-is.
@@ -85,6 +121,20 @@ async def _gather_candidate_items() -> dict[str, dict]:
         tmdb.get_trending_shows(),
         tmdb.get_on_the_air(),
     ]
+
+    # Genre-targeted sweeps: 2 pages of well-rated titles per top genre.
+    for gid in top_movie_genres:
+        for page in (1, 2):
+            movie_calls.append(tmdb.discover_movies(
+                f"with_genres={gid}&sort_by=vote_average.desc"
+                f"&vote_count.gte=200&page={page}"
+            ))
+    for gid in top_show_genres:
+        for page in (1, 2):
+            show_calls.append(tmdb.discover_shows(
+                f"with_genres={gid}&sort_by=vote_average.desc"
+                f"&vote_count.gte=100&page={page}"
+            ))
 
     all_results = await asyncio.gather(
         *movie_calls, *show_calls, return_exceptions=True,
@@ -175,20 +225,6 @@ async def _sync_item(
         logger.warning("Embedding failed for %s: %s", key, exc)
         embedding = []
 
-    metadata = {
-        "title": title,
-        "media_type": media_type,
-        "year": year,
-        "vote_average": full.get("vote_average"),
-        "popularity": full.get("popularity"),
-    }
-
-    if embedding:
-        try:
-            await vs_upsert(key, embedding, metadata, document=text)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("ChromaDB upsert failed for %s: %s", key, exc)
-
     recombee_props = {
         "title": title,
         "overview": overview,
@@ -214,12 +250,12 @@ async def _sync_item(
         vote_average=full.get("vote_average"),
         popularity=full.get("popularity"),
         embedding_stored=bool(embedding),
-        recombee_synced=False,  # flipped after batch push succeeds
+        recombee_synced=False,  # flipped after batch push succeeds (recombee mode)
         last_updated=datetime.utcnow(),
     )
-    # v1.5: also persist embedding to SQLite columns for the new
-    # similarity service. Skip if the embedder returned [] (provider
-    # disabled or transient failure — re-tries next pass).
+    # Persist the embedding to SQLite columns for the similarity
+    # service. Skip if the embedder returned [] (provider disabled or
+    # transient failure — re-tries next pass).
     if embedding:
         provider = get_embeddings_provider()
         row.embedding = _pack_embedding(embedding)
@@ -237,17 +273,20 @@ async def run_content_sync() -> dict[str, int]:
         "fetched": 0, "new": 0, "errors": 0,
         "recombee_sent": 0, "recombee_succeeded": 0, "recombee_failed": 0,
     }
-    # Self-heal Recombee schema: if the boot-time `initialize_schema()`
-    # call failed (e.g. SDK was disabled at boot), re-run it here. The
-    # underlying `_properties_initialized` flag prevents redundant calls
-    # once it actually succeeds.
-    try:
-        recombee = get_recombee()
-        if recombee.available and not recombee._properties_initialized:  # noqa: SLF001
-            await recombee.initialize_schema()
-            logger.info("content_sync: Recombee schema init succeeded")
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("content_sync: Recombee schema init retry failed: %s", exc)
+    recombee_mode = get_settings().recommender == "recombee"
+    # Self-heal Recombee schema (legacy mode only): if the boot-time
+    # `initialize_schema()` call failed (e.g. SDK was disabled at boot),
+    # re-run it here. The underlying `_properties_initialized` flag
+    # prevents redundant calls once it actually succeeds.
+    if recombee_mode:
+        try:
+            from app.services.recombee import get_recombee
+            recombee = get_recombee()
+            if recombee.available and not recombee._properties_initialized:  # noqa: SLF001
+                await recombee.initialize_schema()
+                logger.info("content_sync: Recombee schema init succeeded")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("content_sync: Recombee schema init retry failed: %s", exc)
 
     try:
         candidates = await _gather_candidate_items()
@@ -286,28 +325,35 @@ async def run_content_sync() -> dict[str, int]:
 
     await asyncio.gather(*[_one(k) for k in new_keys])
 
-    # Batch push to Recombee
-    recombee = get_recombee()
+    # Batch mirror to Recombee (legacy mode only)
     failed_ids: set[str] = set()
-    if recombee.available and recombee_items:
-        logger.info("content_sync: batch pushing %d items to Recombee", len(recombee_items))
-        push_stats = await recombee.upsert_items_batch(recombee_items)
-        stats["recombee_sent"] = push_stats["sent"]
-        stats["recombee_succeeded"] = push_stats["succeeded"]
-        stats["recombee_failed"] = push_stats["failed"]
-        failed_ids = push_stats.get("failed_ids", set())
+    mirrored = False
+    if recombee_mode and recombee_items:
+        from app.services.recombee import get_recombee
+        recombee = get_recombee()
+        if recombee.available:
+            logger.info("content_sync: batch pushing %d items to Recombee", len(recombee_items))
+            push_stats = await recombee.upsert_items_batch(recombee_items)
+            stats["recombee_sent"] = push_stats["sent"]
+            stats["recombee_succeeded"] = push_stats["succeeded"]
+            stats["recombee_failed"] = push_stats["failed"]
+            failed_ids = push_stats.get("failed_ids", set())
+            mirrored = True
 
-    # Single batched commit of catalog rows
-    # Mark every row whose Recombee push didn't fail as synced. The
-    # previous "all-or-nothing" rule meant a single failed item left the
-    # entire batch perma-unsynced (because they're now in the catalog and
-    # never re-attempted).
+    # Single batched commit of catalog rows.
+    # In recombee mode, mark every row whose push didn't fail as synced —
+    # an all-or-nothing rule would leave a whole batch perma-unsynced
+    # over one failed item.
     if catalog_rows:
         for row in catalog_rows:
-            if row.tmdb_id not in failed_ids:
+            if mirrored and row.tmdb_id not in failed_ids:
                 row.recombee_synced = True
         async with session_scope() as session:
             session.add_all(catalog_rows)
+        # New embeddings are live — refresh the in-memory matrix so the
+        # engine can recommend fresh items without waiting out the TTL.
+        if any(r.embedding is not None for r in catalog_rows):
+            similarity.invalidate()
 
     logger.info("content_sync: done stats=%s", stats)
     return stats

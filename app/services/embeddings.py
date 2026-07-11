@@ -6,10 +6,9 @@ on LLM_PROVIDER (the same env var that drives the chat LLM).
   LLM_PROVIDER=claude → local sentence-transformers MiniLM (384-d, ~250 MB resident)
   LLM_PROVIDER=none   → NullProvider (returns [], callers handle gracefully)
 
-No new env var. The previous module's public helpers (`build_embedding_text`,
-`embed_text`, `embed_texts`) are preserved so existing call sites in
-content_sync.py and vector_store.py keep working — they now route
-through the provider abstraction internally.
+No new env var. The public helpers (`build_embedding_text`,
+`embed_text`, `embed_texts`) route through the provider abstraction
+internally; content_sync.py and user_sync.py are the main callers.
 
 Failure semantics: every provider returns [] on error rather than
 raising. content_sync handles "skip this batch, retry next pass".
@@ -266,7 +265,7 @@ def get_embeddings_provider() -> EmbeddingProvider:
 
 
 # ============================================================
-# Backward-compatible helpers (used by content_sync.py + vector_store.py)
+# Convenience helpers (used by content_sync.py + user_sync.py)
 # ============================================================
 
 

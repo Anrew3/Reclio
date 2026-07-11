@@ -17,7 +17,7 @@ connecting Trakt, then pull-to-refresh. Rows with `source: tmdb_query`
 always resolve via TMDB so they fill in immediately.
 
 If the rows stay empty after several minutes, check
-`/admin/recombee/preview/<user_id>` to confirm Recombee is producing
+`/admin/engine/preview/<user_id>` to confirm the engine is producing
 recommendations for that user. Empty results usually mean the user's
 Trakt history isn't large enough yet for collaborative filtering — a
 dozen-plus watched titles is the rough floor.
@@ -50,29 +50,29 @@ To pre-pull the model and skip the wait:
 docker compose exec reclio-ollama ollama pull llama3.2:3b
 ```
 
-## Recombee recommendations are empty
+## Recommendations are empty
 
-Recombee needs both:
+The engine needs both:
 
 - **Items in the catalog** — wait for the first `content_sync` to push
-  TMDB titles. Check `/admin/status` → `content.recombee_synced`.
+  TMDB titles. Check `/admin/status` → `content.embedding_stored`.
 - **User interactions** — wait for the first `user_sync` to push the
   user's Trakt history. A dozen-plus interactions is the practical floor.
 
 If both look healthy and recs are still empty, hit
-`/admin/recombee/preview/<user_id>` for the raw output.
+`/admin/engine/preview/<user_id>` for the raw output.
 
 ## `/health` reports `degraded: true`
 
 Open the response body — each downstream service has its own check
 with status code or error string. The container stays "healthy" (HTTP
 200) for everything except a database failure, because Trakt / TMDB /
-Recombee / LLM all have graceful-degradation paths inside the app.
+engine / LLM all have graceful-degradation paths inside the app.
 
 | Failed check | What still works |
 | --- | --- |
 | `trakt` | Cached watch history, materialized rec lists |
 | `tmdb` | Cached titles (6h TTL), `trakt_list` rows |
-| `recombee` | Feeds 2–3 fall back to TMDB `discover` queries |
+| `engine` | Feeds 1–4 fall back to TMDB `discover` queries |
 | `llm` | BYW row titles fall back to f-strings |
 | `db` | **Container is restarted by Docker** |

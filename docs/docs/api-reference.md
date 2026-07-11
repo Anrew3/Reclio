@@ -32,8 +32,8 @@ Returns the **10-feed personalized response** (5 movie + 5 show pairs):
 
 | Position | ID prefix | Title | Source |
 | --- | --- | --- | --- |
-| 1 / 2 | `recommended_*` | Recommended For You | Recombee → Trakt managed list (cold-start: vector seed) |
-| 3 / 4 | `because_watched_*_tmdb_*` | Because You Watched [last] | Recombee item-to-item + vector blend → Trakt list |
+| 1 / 2 | `recommended_*` | Recommended For You | local engine → Trakt managed list (cold-start: vector seed) |
+| 3 / 4 | `because_watched_*_tmdb_*` | Because You Watched [last] | engine item-to-item + vector blend → Trakt list |
 | 5 / 6 | `trending_*` | Trending Movies / Shows | TMDB `/trending` |
 | 7 / 8 | `top_genre_*` | [Genre] Movies / Shows You'll Love | TMDB `/discover` (your top genre + prefs) |
 | 9 / 10 | `hidden_gems_*` | Hidden Gem Movies / Shows | TMDB `/discover` (vote_average ≥ 7.5, scaled by `discovery_level`) |
@@ -81,7 +81,7 @@ default), `/admin/*` returns `503`. All requests require the header
 `X-Admin-Token: <your token>`.
 
 ```bash
-# Full content refresh (TMDB → embeddings → Recombee → catalog)
+# Full content refresh (TMDB → embeddings → catalog)
 curl -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
      https://<your-host>/admin/sync/content
 
@@ -98,12 +98,12 @@ The two `POST` routes return `202 Accepted` and run the job in the
 background — tail `docker compose logs app` to watch progress.
 
 `/admin/status` returns counts of accounts, members, catalog items,
-plus Recombee availability and the timestamp of the last content sync.
+plus engine status and the timestamp of the last content sync.
 
 ### Diagnostics (added in v1.5)
 
 ```bash
-# Recombee end-to-end health probe (verdict + remediation)
+# Recombee end-to-end health probe (legacy RECOMMENDER=recombee mode only)
 curl -H "X-Admin-Token: $ADMIN_TOKEN" \
      https://<your-host>/admin/recombee/diagnose
 
@@ -111,11 +111,11 @@ curl -H "X-Admin-Token: $ADMIN_TOKEN" \
 curl -H "X-Admin-Token: $ADMIN_TOKEN" \
      "https://<your-host>/admin/recombee/diagnose?write_test=1"
 
-# Recombee preview — what's the rec engine actually producing for a user?
+# Engine preview — what's the rec engine actually producing for a user?
 curl -H "X-Admin-Token: $ADMIN_TOKEN" \
-     https://<your-host>/admin/recombee/preview/<user_id>?count=10
+     https://<your-host>/admin/engine/preview/<user_id>?count=10
 
-# Hourly health-check buffer — last 24 snapshots of DB / Trakt / TMDB / Recombee / LLM
+# Hourly health-check buffer — last 24 snapshots of DB / Trakt / TMDB / engine / LLM
 curl -H "X-Admin-Token: $ADMIN_TOKEN" \
      https://<your-host>/admin/health/history
 
@@ -132,8 +132,8 @@ curl -H "X-Admin-Token: $ADMIN_TOKEN" \
      https://<your-host>/admin/similar/movie_27205?k=12
 ```
 
-`/admin/recombee/diagnose` is the most useful when something looks
-off in the Recombee web UI. It returns one of:
+`/admin/recombee/diagnose` (legacy recombee mode) is the most useful
+when something looks off in the Recombee web UI. It returns one of:
 `ok` / `wrong_region` / `unreachable` / `no_pushes_yet` /
 `writes_silently_failing` / `no_credentials` plus plain-English
 `next_steps`. See [Troubleshooting](./troubleshooting) for full

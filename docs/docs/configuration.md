@@ -16,8 +16,6 @@ Every setting is an environment variable. The repo ships an
 | `TRAKT_CLIENT_ID` | Trakt OAuth app client id |
 | `TRAKT_CLIENT_SECRET` | Trakt OAuth app client secret |
 | `TMDB_API_KEY` | TMDB v3 API key |
-| `RECOMBEE_DATABASE_ID` | Recombee database id |
-| `RECOMBEE_PRIVATE_TOKEN` | Recombee private token |
 | `FERNET_KEY` | 32-byte base64 key used to encrypt Trakt tokens at rest |
 | `SECRET_KEY` | Signing key for session cookies |
 | `BASE_URL` | Public URL, no trailing slash (e.g. `https://reclio.example.com`) |
@@ -26,11 +24,13 @@ Every setting is an environment variable. The repo ships an
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `RECOMBEE_REGION` | `us-west` | `us-west` · `eu-west` · `ap-se` |
+| `RECOMMENDER` | `local` | `local` (self-hosted engine, default) · `recombee` (legacy SaaS proxy) |
+| `RECOMBEE_DATABASE_ID` | _(blank)_ | Only with `RECOMMENDER=recombee` |
+| `RECOMBEE_PRIVATE_TOKEN` | _(blank)_ | Only with `RECOMMENDER=recombee` |
+| `RECOMBEE_REGION` | `us-west` | Only with `RECOMMENDER=recombee` (`us-west` · `eu-west` · `ap-se`) |
 | `ADMIN_TOKEN` | _(blank = disabled)_ | Enables `/admin/*` endpoints when set |
 | `PORT` | `8000` | Internal app port |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./data/db/reclio.db` | SQLAlchemy URL |
-| `CHROMA_PERSIST_DIR` | `./data/chroma` | ChromaDB storage path |
 
 ## LLM provider (chat)
 
@@ -89,7 +89,7 @@ defaults work well; override if you want tighter or looser intervals.
 
 In v1.5 the user-sync sweep also runs an
 [hourly health check](./api-reference#diagnostics-added-in-v15) on
-every external dependency (DB, Trakt, TMDB, Recombee, LLM). It's
+every dependency (DB, Trakt, TMDB, recommendation engine, LLM). It's
 silent on the happy path and logs WARNING with full diagnostic detail
 on any degradation.
 

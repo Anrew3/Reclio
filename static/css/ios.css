@@ -24,15 +24,25 @@
   --fill-secondary: rgba(120, 120, 128, 0.16);
   --fill-tertiary: rgba(118, 118, 128, 0.12);
 
-  --radius-card: 16px;
+  --radius-card: 20px;
   --radius-button: 14px;
   --radius-pill: 100px;
 
   --shadow-card: 0 10px 30px rgba(0, 0, 0, 0.25);
+
+  /* Motion — the two curves everything animates with.
+     ease-out-ios: decisive start, soft landing (UIKit default-ish).
+     ease-spring:  slight overshoot for playful elements (toggles, FAB). */
+  --ease-out-ios: cubic-bezier(0.32, 0.72, 0.27, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 * {
   box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
 }
 
 html, body {
@@ -49,6 +59,7 @@ html, body {
   text-rendering: optimizeLegibility;
   min-height: 100vh;
   overflow-x: hidden;
+  overscroll-behavior-y: none;
 }
 
 body {
@@ -67,12 +78,42 @@ body {
     calc(env(safe-area-inset-right, 0px) + 20px)
     calc(env(safe-area-inset-bottom, 0px) + 40px)
     calc(env(safe-area-inset-left, 0px) + 20px);
-  animation: fade-in 320ms ease-out;
 }
 
 @keyframes fade-in {
   from { opacity: 0; transform: translateY(6px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+/* Staggered entrance: each top-level block rises in a beat after the
+   previous one — the "cards settling into place" feel of iOS sheets. */
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(14px) scale(0.99); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+.page > * {
+  animation: rise-in 520ms var(--ease-out-ios) backwards;
+}
+.page > *:nth-child(1) { animation-delay: 0ms; }
+.page > *:nth-child(2) { animation-delay: 50ms; }
+.page > *:nth-child(3) { animation-delay: 100ms; }
+.page > *:nth-child(4) { animation-delay: 150ms; }
+.page > *:nth-child(5) { animation-delay: 200ms; }
+.page > *:nth-child(6) { animation-delay: 250ms; }
+.page > *:nth-child(n+7) { animation-delay: 300ms; }
+
+/* Fixed/overlay elements manage their own transforms — the entrance
+   animation would override .ask-panel's off-screen translateY and
+   flash it open on load. */
+.page > .ask-fab,
+.page > .ask-panel,
+.page > .ask-backdrop {
+  animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page > * { animation: none; }
 }
 
 /* ---------- Typography ---------- */
@@ -189,12 +230,31 @@ p { margin: 0; }
   font-weight: 600;
   text-decoration: none;
   cursor: pointer;
-  transition: transform 120ms ease, background 120ms ease, opacity 120ms ease;
+  transition: transform 220ms var(--ease-spring),
+              background 160ms ease, opacity 160ms ease;
   min-height: 50px;
   font-family: inherit;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.btn:active { transform: scale(0.97); opacity: 0.85; }
+.btn:active { transform: scale(0.96); opacity: 0.85; }
+
+/* In-flight state (e.g. "Refreshing…") with an inline spinner */
+.btn.btn-working {
+  opacity: 0.75;
+  cursor: default;
+  pointer-events: none;
+}
+
+.btn-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  display: inline-block;
+  animation: spin 0.8s linear infinite;
+}
 
 .btn-primary {
   background: var(--accent-blue);
@@ -229,16 +289,28 @@ p { margin: 0; }
 /* ---------- Cards ---------- */
 
 .ios-card {
+  /* Frosted-glass material: translucent fill + backdrop blur picks up
+     the ambient gradient behind the page, like iOS grouped cards over
+     a wallpaper. Falls back to the old opaque fill where backdrop
+     filters aren't supported. */
   background: var(--bg-secondary);
   border-radius: var(--radius-card);
   padding: 20px;
   margin-bottom: 14px;
-  /* Layered shadow + 1px hairline border — closer to the depth iOS
-     gets on grouped-list cards in dark mode. */
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.04) inset,
     0 10px 30px rgba(0, 0, 0, 0.28),
     0 1px 2px rgba(0, 0, 0, 0.4);
+  transition: transform 260ms var(--ease-out-ios),
+              box-shadow 260ms var(--ease-out-ios);
+}
+
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  .ios-card {
+    background: rgba(28, 28, 30, 0.72);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    backdrop-filter: blur(24px) saturate(160%);
+  }
 }
 
 /* ---------- Permissions (connect page) ---------- */
@@ -407,6 +479,23 @@ p { margin: 0; }
   overflow: hidden;
   background: var(--bg-tertiary);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.35);
+  transition: transform 260ms var(--ease-spring),
+              box-shadow 260ms var(--ease-out-ios);
+}
+
+/* Gentle lift on hover (trackpad), press-down on touch — the tvOS
+   poster feel, kept subtle. */
+@media (hover: hover) {
+  .recent-item:hover .recent-poster {
+    transform: translateY(-4px) scale(1.03);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.5);
+  }
+}
+
+.recent-item:active .recent-poster { transform: scale(0.97); }
+
+@media (prefers-reduced-motion: reduce) {
+  .recent-poster { transition: none; }
 }
 
 .recent-poster img {
@@ -472,6 +561,14 @@ p { margin: 0; }
   padding: 22px;
 }
 
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  .personality-card {
+    background:
+      radial-gradient(ellipse at top right, rgba(191,90,242,0.08), transparent 60%),
+      rgba(28, 28, 30, 0.72);
+  }
+}
+
 .personality-head {
   display: flex;
   align-items: center;
@@ -521,35 +618,27 @@ p { margin: 0; }
   filter: drop-shadow(0 4px 12px rgba(0,0,0,0.35));
 }
 
-/* Slice draw-in: opacity-only fade. Earlier versions also animated
-   `transform: scale(...)` which conflicted with the SVG inline
-   `transform="rotate(-90 50 50)"` attribute on every browser that
-   honors transform-origin in SVG coordinate space differently
-   (Safari/iOS especially). The slice would flash on, then snap
-   away when the animation ended and the inline rotate reapplied.
-   Keep it simple: fade in, stay visible, both fill modes set. */
+/* Slice draw-in: the CSS property (var-driven) is the source of truth
+   for each arc's final dasharray — it overrides the SVG attribute, so
+   the chart renders complete even without JS. On load, JS briefly adds
+   .donut-init (arcs collapsed to 0) and removes it a frame later; the
+   staggered transition sweeps every slice out to its final length.
+   Animating dash length never touches `transform`, so it can't fight
+   the inline `rotate(-90 50 50)` the way the old scale animation did
+   on Safari/iOS. */
 .personality-donut-slice {
-  opacity: 0;
-  animation: donut-in 600ms cubic-bezier(0.32, 0.72, 0.27, 1) forwards;
-}
-.personality-donut-slice:nth-of-type(2) { animation-delay: 60ms; }
-.personality-donut-slice:nth-of-type(3) { animation-delay: 120ms; }
-.personality-donut-slice:nth-of-type(4) { animation-delay: 180ms; }
-.personality-donut-slice:nth-of-type(5) { animation-delay: 240ms; }
-.personality-donut-slice:nth-of-type(6) { animation-delay: 300ms; }
-.personality-donut-slice:nth-of-type(7) { animation-delay: 360ms; }
-
-@keyframes donut-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+  stroke-dasharray: var(--arc) var(--gap);
+  transition: stroke-dasharray 950ms var(--ease-out-ios);
+  transition-delay: calc(var(--i, 0) * 90ms);
 }
 
-/* Honor reduced-motion preferences: skip the stagger entirely */
+.personality-donut.donut-init .personality-donut-slice {
+  stroke-dasharray: 0 264;
+  transition: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .personality-donut-slice {
-    opacity: 1;
-    animation: none;
-  }
+  .personality-donut-slice { transition: none; }
 }
 
 .personality-donut-center {
@@ -582,6 +671,14 @@ p { margin: 0; }
   font-variant-numeric: tabular-nums;
 }
 
+.personality-donut-center {
+  animation: fade-in 700ms var(--ease-out-ios) 200ms backwards;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .personality-donut-center { animation: none; }
+}
+
 .personality-legend {
   list-style: none;
   margin: 0;
@@ -596,19 +693,27 @@ p { margin: 0; }
 .personality-legend-row {
   display: grid;
   grid-template-columns: 12px 1fr auto;
+  grid-template-areas:
+    "swatch name pct"
+    ".      bar  bar";
   align-items: center;
-  gap: 10px;
+  column-gap: 10px;
+  row-gap: 5px;
   font-size: 14px;
+  animation: rise-in 480ms var(--ease-out-ios) backwards;
+  animation-delay: calc(var(--i, 0) * 70ms + 250ms);
 }
 
 .personality-legend-swatch {
+  grid-area: swatch;
   width: 12px;
   height: 12px;
-  border-radius: 3px;
+  border-radius: 4px;
   flex-shrink: 0;
 }
 
 .personality-legend-name {
+  grid-area: name;
   color: var(--label-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -616,10 +721,41 @@ p { margin: 0; }
 }
 
 .personality-legend-pct {
+  grid-area: pct;
   font-size: 13px;
   font-weight: 600;
   color: var(--label-tertiary);
   font-variant-numeric: tabular-nums;
+}
+
+/* Mini proportion bar under each legend entry — reads like the
+   iOS Storage breakdown. Fill sweeps in after the row appears. */
+.personality-legend-bar {
+  grid-area: bar;
+  display: block;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--fill-tertiary);
+  overflow: hidden;
+}
+
+.personality-legend-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  width: var(--pct, 0%);
+  opacity: 0.9;
+  animation: bar-sweep 800ms var(--ease-out-ios) backwards;
+  animation-delay: calc(var(--i, 0) * 70ms + 420ms);
+}
+
+@keyframes bar-sweep {
+  from { width: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .personality-legend-row,
+  .personality-legend-bar-fill { animation: none; }
 }
 
 @media (max-width: 460px) {
@@ -1032,11 +1168,19 @@ p { margin: 0; }
   box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.6);
   z-index: 55;
   transform: translateY(110%);
-  transition: transform 320ms cubic-bezier(0.32, 0.72, 0.27, 1);
+  transition: transform 380ms var(--ease-out-ios);
   display: flex;
   flex-direction: column;
   gap: 10px;
   max-height: 75vh;
+}
+
+@supports (backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px)) {
+  .ask-panel {
+    background: rgba(28, 28, 30, 0.82);
+    -webkit-backdrop-filter: blur(28px) saturate(160%);
+    backdrop-filter: blur(28px) saturate(160%);
+  }
 }
 
 .ask-panel.open { transform: translateY(0); }
@@ -1119,7 +1263,46 @@ p { margin: 0; }
   line-height: 1.4;
   white-space: pre-wrap;
   word-wrap: break-word;
-  animation: fade-in 200ms ease-out;
+  animation: bubble-in 280ms var(--ease-spring) backwards;
+  transform-origin: bottom left;
+}
+
+.chat-bubble-user { transform-origin: bottom right; }
+
+@keyframes bubble-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.92); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-bubble { animation: none; }
+}
+
+/* iMessage-style typing indicator */
+.chat-typing {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 13px 16px;
+}
+
+.typing-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--label-tertiary);
+  animation: typing-bounce 1.2s ease-in-out infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 150ms; }
+.typing-dot:nth-child(3) { animation-delay: 300ms; }
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30%           { transform: translateY(-4px); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .typing-dot { animation: none; opacity: 0.6; }
 }
 
 .chat-bubble-user {

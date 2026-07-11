@@ -1,8 +1,8 @@
-"""Hourly background sanity check for every external dependency.
+"""Hourly background sanity check for every dependency.
 
-Runs five checks in parallel: DB, Trakt, TMDB, Recombee, LLM. Each
-check returns a structured CheckResult; the snapshot is recorded in
-a 24-entry rolling buffer (one day at hourly cadence).
+Runs five checks in parallel: DB, Trakt, TMDB, recommendation engine,
+LLM. Each check returns a structured CheckResult; the snapshot is
+recorded in a 24-entry rolling buffer (one day at hourly cadence).
 
 Logging strategy — deliberately quiet on the happy path:
 
@@ -13,10 +13,11 @@ Logging strategy — deliberately quiet on the happy path:
   fail      → fail  : DEBUG (don't spam — but admin endpoint can see it)
 
 When a check FAILS, it runs deeper diagnostics specific to that
-service (Recombee: full diagnose verdict; LLM: actual generation
-test with provider name + key length; etc.) and logs a structured
-"diagnostic" object so the operator has everything they need
-without having to re-run anything by hand.
+service (engine: catalog/embedding counts or the Recombee diagnose
+verdict in legacy mode; LLM: actual generation test with provider
+name + key length; etc.) and logs a structured "diagnostic" object
+so the operator has everything they need without re-running anything
+by hand.
 """
 
 from __future__ import annotations
@@ -178,14 +179,48 @@ async def _check_tmdb() -> CheckResult:
         )
 
 
-async def _check_recombee() -> CheckResult:
-    """Recombee: actually call ListItems + compare counts.
+async def _check_engine() -> CheckResult:
+    """Recommendation engine.
 
-    Surfaces the same `verdict` taxonomy as the /admin/recombee/diagnose
-    endpoint (wrong_region / writes_silently_failing / etc.) so the log
-    line tells the operator exactly what's broken without further prodding.
+    local mode: verify the interaction store answers and the catalog has
+    embedded items for the similarity matrix. recombee (legacy) mode:
+    call ListItems + compare counts, surfacing the wrong_region /
+    writes_silently_failing verdict taxonomy.
     """
     t0 = time.monotonic()
+
+    from app.config import get_settings
+    if get_settings().recommender != "recombee":
+        try:
+            from app.services.recommender import engine_status
+            status = await engine_status()
+            embedded = status.get("catalog_embedded") or 0
+            if status.get("error"):
+                return CheckResult(
+                    "engine", "failed", _ms_since(t0), detail=status,
+                    error=status["error"],
+                )
+            if embedded == 0:
+                return CheckResult(
+                    "engine", "degraded", _ms_since(t0),
+                    detail={
+                        **status,
+                        "remediation": (
+                            "No embedded catalog items — recommendations fall "
+                            "back to popularity. Run POST /admin/sync/content "
+                            "and check the embeddings provider."
+                        ),
+                    },
+                    error="no embedded catalog items yet",
+                )
+            return CheckResult("engine", "ok", _ms_since(t0), detail=status)
+        except Exception as exc:  # noqa: BLE001
+            return CheckResult(
+                "engine", "failed", _ms_since(t0),
+                detail={"exception_type": type(exc).__name__},
+                error=str(exc)[:200],
+            )
+
     try:
         from app.services.recombee import get_recombee
         recombee = get_recombee()
@@ -193,19 +228,19 @@ async def _check_recombee() -> CheckResult:
 
         if not config["sdk_loaded"]:
             return CheckResult(
-                "recombee", "failed", _ms_since(t0),
+                "engine", "failed", _ms_since(t0),
                 detail={"config": config, "verdict": "sdk_missing"},
                 error="recombee-api-client SDK not installed",
             )
         if not config["token_present"] or not config["database_id"]:
             return CheckResult(
-                "recombee", "degraded", _ms_since(t0),
+                "engine", "degraded", _ms_since(t0),
                 detail={"config": config, "verdict": "no_credentials"},
                 error="RECOMBEE_DATABASE_ID or RECOMBEE_PRIVATE_TOKEN missing",
             )
         if not config["available"]:
             return CheckResult(
-                "recombee", "failed", _ms_since(t0),
+                "engine", "failed", _ms_since(t0),
                 detail={"config": config, "verdict": "client_init_failed"},
                 error="Recombee client failed to initialize despite credentials present",
             )
@@ -215,7 +250,7 @@ async def _check_recombee() -> CheckResult:
             # Connectivity failure — try a write+read probe for deeper signal
             write_ok, write_err = await recombee.write_test_item()
             return CheckResult(
-                "recombee", "failed", _ms_since(t0),
+                "engine", "failed", _ms_since(t0),
                 detail={
                     "config": config,
                     "verdict": "unreachable",
@@ -237,7 +272,7 @@ async def _check_recombee() -> CheckResult:
 
         if catalog_synced > 5 and rec_count == 0:
             return CheckResult(
-                "recombee", "failed", _ms_since(t0),
+                "engine", "failed", _ms_since(t0),
                 detail={
                     "config": config,
                     "verdict": "wrong_region",
@@ -255,7 +290,7 @@ async def _check_recombee() -> CheckResult:
             )
         if catalog_synced > 25 and rec_count < catalog_synced // 4:
             return CheckResult(
-                "recombee", "degraded", _ms_since(t0),
+                "engine", "degraded", _ms_since(t0),
                 detail={
                     "config": config,
                     "verdict": "writes_silently_failing",
@@ -267,7 +302,7 @@ async def _check_recombee() -> CheckResult:
             )
 
         return CheckResult(
-            "recombee", "ok", _ms_since(t0),
+            "engine", "ok", _ms_since(t0),
             detail={
                 "verdict": "ok",
                 "recombee_item_count_visible": rec_count,
@@ -276,11 +311,11 @@ async def _check_recombee() -> CheckResult:
             },
         )
     except asyncio.TimeoutError:
-        return CheckResult("recombee", "failed", _ms_since(t0),
+        return CheckResult("engine", "failed", _ms_since(t0),
                            error=f"timeout after {_PROBE_TIMEOUT}s")
     except Exception as exc:  # noqa: BLE001
         return CheckResult(
-            "recombee", "failed", _ms_since(t0),
+            "engine", "failed", _ms_since(t0),
             detail={"exception_type": type(exc).__name__},
             error=str(exc)[:200],
         )
@@ -390,7 +425,7 @@ async def run_health_checks() -> HealthSnapshot:
         _check_database(),
         _check_trakt(),
         _check_tmdb(),
-        _check_recombee(),
+        _check_engine(),
         _check_llm(),
         return_exceptions=False,
     )

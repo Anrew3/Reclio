@@ -4,9 +4,10 @@ Two endpoints:
   GET  /ask        renders the chat UI
   POST /ask/reply  returns a JSON {answer, error} for an XHR submission
 
-Read-only: the assistant never triggers sync, mutates preferences, or
-hits Trakt/Recombee write endpoints. It just synthesizes an answer from
-the user's existing TasteCache + recent watch history.
+Mostly read-only: the assistant synthesizes answers from the user's
+existing TasteCache + recent watch history. The only writes are
+preference mutations the user explicitly asks for ("stop showing me
+horror"), which land in UserPreferences + the local interaction store.
 
 Rate limit: a per-user token bucket (5 questions per 60 s). Cheap to
 implement in-process — there's no horizontal scale model for this app.
@@ -32,8 +33,8 @@ from app.models.preferences import UserPreferences
 from app.models.taste_cache import TasteCache
 from app.routers.onboarding import MOODS as MOOD_PALETTE
 from app.routers.portal import _current_account_id, _recently_watched, _resolve_active_user
+from app.services import recommender
 from app.services.llm import get_llm
-from app.services.recombee import get_recombee
 from app.services.tmdb import MOVIE_GENRES, TV_GENRES, get_tmdb
 
 _TMDB_POSTER_BASE = "https://image.tmdb.org/t/p/w185"
@@ -325,7 +326,7 @@ async def ask_reply(
             _merge_kw("boosted_keywords", mutations.get("boost_keywords") or [], "boosted")
             _merge_kw("excluded_keywords", mutations.get("exclude_keywords") or [], "muted")
 
-            # Title blocks — push as Recombee negative interactions for
+            # Title blocks — recorded as engine negative interactions for
             # any titles we can resolve to a TMDB id from recent watches
             # or the catalog. Even without resolution we keep the title
             # string for display so the user can see Reclio remembers.
@@ -343,22 +344,20 @@ async def ask_reply(
                     prefs.blocked_titles = cur[:50]  # hard cap
                     applied_changes.append(f"{added} title(s) blocked")
 
-                # Send Recombee a -1 rating for any block whose title
-                # matches a recent watch — best-effort id resolution.
-                recombee = get_recombee()
-                if recombee.available:
-                    title_to_item = {}
-                    for w in recent:
-                        if w.get("tmdb_id") and w.get("title"):
-                            prefix = "movie" if w.get("kind") == "movie" else "tv"
-                            title_to_item[w["title"].lower()] = f"{prefix}_{w['tmdb_id']}"
-                    for b in new_blocks:
-                        item_id = title_to_item.get(b.get("title", "").lower())
-                        if item_id:
-                            try:
-                                await recombee.add_negative_interaction(user.id, item_id)
-                            except Exception:  # noqa: BLE001
-                                pass
+                # Record an engine block for any title we can resolve to
+                # an id from recent watches — best-effort id resolution.
+                title_to_item = {}
+                for w in recent:
+                    if w.get("tmdb_id") and w.get("title"):
+                        prefix = "movie" if w.get("kind") == "movie" else "tv"
+                        title_to_item[w["title"].lower()] = f"{prefix}_{w['tmdb_id']}"
+                for b in new_blocks:
+                    item_id = title_to_item.get(b.get("title", "").lower())
+                    if item_id:
+                        try:
+                            await recommender.add_negative_interaction(user.id, item_id)
+                        except Exception:  # noqa: BLE001
+                            pass
 
             # Mark TasteCache stale so the next sync rebuilds rec lists
             # with the new excluded/boosted set.
@@ -403,8 +402,8 @@ async def ask_dislike_confirm(
 
     Body: {tmdb_id, kind, title, reason?, year?}
     Adds the title to UserPreferences.blocked_titles (with the
-    optional reason note), pushes a Recombee -1 rating so collaborative
-    filtering down-weights similar items, and replies with a short
+    optional reason note), records an engine block so the profile
+    vector steers away from similar items, and replies with a short
     confirmation. Always returns HTTP 200; errors live in the body.
     """
     account_id = _current_account_id(request)
@@ -465,16 +464,14 @@ async def ask_dislike_confirm(
 
     await session.commit()
 
-    # Push Recombee a strong negative signal — RecommendItemsToUser /
-    # RecommendItemsToItem both filter on this and propagate the dislike
-    # to similar items in the latent space.
+    # Record a strong negative signal — the engine excludes the item
+    # outright and its embedding subtracts from the profile vector, so
+    # similar titles get down-ranked too.
     item_id = f"{'movie' if kind == 'movie' else 'tv'}_{tmdb_id}"
     try:
-        recombee = get_recombee()
-        if recombee.available:
-            await recombee.add_negative_interaction(user.id, item_id)
+        await recommender.add_negative_interaction(user.id, item_id)
     except Exception as exc:  # noqa: BLE001
-        logger.debug("ask: recombee negative interaction failed: %s", exc)
+        logger.debug("ask: negative interaction failed: %s", exc)
 
     answer = (
         f"Got it — \"{title}\" is off your recommendations."

@@ -511,9 +511,13 @@ def _personality_breakdown(
     The taste-cache stores per-media scores already normalized to [0, 1].
     For the dashboard's "personality wheel" we treat both media types
     as one bag (a viewer who loves Sci-Fi movies AND Sci-Fi shows is
-    *very* into sci-fi). Returns top-N genres with pct + a precomputed
-    SVG-stroke offset used by the donut chart (math done server-side
+    *very* into sci-fi). Returns top-N genres with pct + precomputed
+    SVG-stroke geometry used by the donut chart (math done server-side
     so the template stays declarative).
+
+    Each slice's drawn arc is trimmed by a small fixed gap so adjacent
+    slices read as separate segments (the iOS Health look); offsets
+    still advance by the full arc so percentages stay truthful.
     """
     bag: dict[str, float] = {}
     for scores, table in ((movie_scores or {}, MOVIE_GENRES),
@@ -537,6 +541,9 @@ def _personality_breakdown(
     # Donut geometry: radius 42 → circumference ~263.9. The donut SVG
     # uses stroke-dasharray "len gap" + stroke-dashoffset to draw arcs.
     circumference = 2 * 3.141592653589793 * 42
+    # Visual breathing room between segments. Only applied when there's
+    # more than one slice — a single 100% slice should be a full ring.
+    slice_gap = 2.4 if len(top) > 1 else 0.0
     for i, (name, score) in enumerate(top):
         if i == len(top) - 1:
             pct = 100 - running_pct
@@ -544,13 +551,14 @@ def _personality_breakdown(
             pct = max(1, int(round(score / total * 100)))
             running_pct += pct
         arc_len = circumference * (pct / 100.0)
+        drawn_len = max(0.8, arc_len - slice_gap)
         out.append({
             "name": name,
             "pct": pct,
             "color": _DONUT_COLORS[i % len(_DONUT_COLORS)],
-            "arc_len": round(arc_len, 2),
-            "gap_len": round(circumference - arc_len, 2),
-            "offset": round(cumulative_offset, 2),
+            "arc_len": round(drawn_len, 2),
+            "gap_len": round(circumference - drawn_len, 2),
+            "offset": round(cumulative_offset - slice_gap / 2.0, 2),
         })
         cumulative_offset -= arc_len  # next slice starts where this one ends
     return out

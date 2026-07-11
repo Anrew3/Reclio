@@ -14,9 +14,9 @@ and `Caddyfile`.
 
 - Docker + Docker Compose
 - A public domain with DNS pointing at the server (for HTTPS)
-- API keys: [Trakt](https://trakt.tv/oauth/applications),
-  [TMDB](https://www.themoviedb.org/settings/api),
-  [Recombee](https://www.recombee.com/)
+- API keys: [Trakt](https://trakt.tv/oauth/applications) and
+  [TMDB](https://www.themoviedb.org/settings/api) — both free. That's
+  the whole list: since v1.7 the recommendation engine runs locally.
 
 ## Docker Compose (recommended)
 
@@ -28,7 +28,7 @@ cp .env.example .env
 python3 -c "from cryptography.fernet import Fernet; print('FERNET_KEY=' + Fernet.generate_key().decode())" >> .env
 python3 -c "import secrets; print('SECRET_KEY=' + secrets.token_hex(32))" >> .env
 
-# Edit .env — fill in TRAKT_*, TMDB_API_KEY, RECOMBEE_*, set BASE_URL
+# Edit .env — fill in TRAKT_*, TMDB_API_KEY, set BASE_URL
 # Edit Caddyfile — replace the hostname with your domain
 
 docker compose up -d --build
@@ -55,14 +55,12 @@ and the initial TMDB sync warms the catalog.
 2. Request an API key — the free Developer tier is plenty.
 3. Copy the **API Read Access Token (v3)** → `TMDB_API_KEY`.
 
-### Recombee
+### Recombee (optional, legacy)
 
-1. Sign up at [recombee.com](https://www.recombee.com/).
-2. Create a database — the free tier fits tens of thousands of items
-   and millions of interactions.
-3. Copy **Database ID** → `RECOMBEE_DATABASE_ID`,
-   **Private token** → `RECOMBEE_PRIVATE_TOKEN`,
-   region → `RECOMBEE_REGION` (`us-west`, `eu-west`, or `ap-se`).
+Not needed since v1.7 — the default `RECOMMENDER=local` engine runs
+entirely on your box. If you specifically want the pre-1.7 behavior,
+set `RECOMMENDER=recombee`, `pip install recombee-api-client`, and see
+the [Recommendation engine](./recombee) page for the credentials.
 
 ## Local development (no Docker)
 

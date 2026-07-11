@@ -44,8 +44,8 @@
           {% endif %}
         </p>
       </div>
-      <form action="/dashboard/refresh" method="post">
-        <button type="submit" class="btn btn-secondary">Refresh Now</button>
+      <form action="/dashboard/refresh" method="post" id="refresh-form">
+        <button type="submit" class="btn btn-secondary" id="refresh-btn">Refresh Now</button>
       </form>
     </div>
   {% else %}
@@ -103,11 +103,14 @@
   {% if personality_breakdown %}
   <div class="taste-section personality-donut-section">
     <div class="personality-donut-wrap">
-      <svg class="personality-donut" viewBox="0 0 100 100" aria-hidden="true">
+      <svg class="personality-donut" id="personality-donut" viewBox="0 0 100 100" aria-hidden="true">
         <!-- Background ring -->
         <circle cx="50" cy="50" r="42" fill="none"
                 stroke="rgba(120,120,128,0.16)" stroke-width="14" />
-        <!-- Slices -->
+        <!-- Slices. Final arc lengths live in CSS vars; the .donut-init
+             class collapses them to 0 and its removal sweeps each arc
+             in with a staggered transition. Without JS the vars render
+             the finished chart directly. -->
         {% for slice in personality_breakdown %}
         <circle cx="50" cy="50" r="42" fill="none"
                 stroke="{{ slice.color }}"
@@ -116,20 +119,24 @@
                 stroke-dasharray="{{ slice.arc_len }} {{ slice.gap_len }}"
                 stroke-dashoffset="{{ slice.offset }}"
                 transform="rotate(-90 50 50)"
-                class="personality-donut-slice" />
+                class="personality-donut-slice"
+                style="--arc: {{ slice.arc_len }}; --gap: {{ slice.gap_len }}; --i: {{ loop.index0 }};" />
         {% endfor %}
       </svg>
       <div class="personality-donut-center">
         <p class="personality-donut-top-name">{{ personality_breakdown[0].name }}</p>
-        <p class="personality-donut-top-pct">{{ personality_breakdown[0].pct }}%</p>
+        <p class="personality-donut-top-pct"><span id="donut-count" data-target="{{ personality_breakdown[0].pct }}">0</span>%</p>
       </div>
     </div>
     <ul class="personality-legend">
       {% for slice in personality_breakdown %}
-      <li class="personality-legend-row">
+      <li class="personality-legend-row" style="--i: {{ loop.index0 }};">
         <span class="personality-legend-swatch" style="background: {{ slice.color }};"></span>
         <span class="personality-legend-name">{{ slice.name }}</span>
         <span class="personality-legend-pct">{{ slice.pct }}%</span>
+        <span class="personality-legend-bar" aria-hidden="true">
+          <span class="personality-legend-bar-fill" style="background: {{ slice.color }}; --pct: {{ slice.pct }}%;"></span>
+        </span>
       </li>
       {% endfor %}
     </ul>
@@ -221,6 +228,54 @@
 {% block scripts %}
 <script>
 (function(){
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // --- Donut chart: sweep each slice in, count the center % up ---
+  var donut = document.getElementById('personality-donut');
+  if (donut) {
+    if (!reduceMotion) {
+      // Collapse arcs before first paint (this script runs synchronously
+      // at end of body), then release after the collapsed state paints so
+      // the CSS transition sweeps each slice to its final arc.
+      donut.classList.add('donut-init');
+      requestAnimationFrame(function(){
+        requestAnimationFrame(function(){
+          donut.classList.remove('donut-init');
+        });
+      });
+    }
+
+    var counter = document.getElementById('donut-count');
+    if (counter) {
+      var target = parseInt(counter.getAttribute('data-target') || '0', 10);
+      if (reduceMotion) {
+        counter.textContent = target;
+      } else {
+        var t0 = null, DURATION = 900;
+        var tick = function(ts){
+          if (t0 === null) t0 = ts;
+          var p = Math.min(1, (ts - t0) / DURATION);
+          // easeOutCubic — fast start, gentle landing, iOS-style
+          var eased = 1 - Math.pow(1 - p, 3);
+          counter.textContent = Math.round(eased * target);
+          if (p < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      }
+    }
+  }
+
+  // --- Refresh button: immediate feedback while the POST round-trips ---
+  var refreshForm = document.getElementById('refresh-form');
+  var refreshBtn = document.getElementById('refresh-btn');
+  if (refreshForm && refreshBtn) {
+    refreshForm.addEventListener('submit', function(){
+      refreshBtn.disabled = true;
+      refreshBtn.classList.add('btn-working');
+      refreshBtn.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Refreshing…';
+    });
+  }
+
   // --- copy-to-clipboard ---
   document.querySelectorAll('.copy-btn').forEach(function(btn){
     btn.addEventListener('click', async function(){
@@ -275,7 +330,22 @@
     wrap.className = 'chat-bubble chat-bubble-' + kind;
     wrap.textContent = text;
     thread.appendChild(wrap);
-    thread.scrollTop = thread.scrollHeight;
+    thread.scrollTo({ top: thread.scrollHeight, behavior: reduceMotion ? 'auto' : 'smooth' });
+  }
+
+  // iMessage-style typing indicator shown while /ask/reply is in flight.
+  var typingEl = null;
+  function showTyping(){
+    if (typingEl) return;
+    typingEl = document.createElement('div');
+    typingEl.className = 'chat-bubble chat-bubble-reclio chat-typing';
+    typingEl.setAttribute('aria-label', 'Reclio is thinking');
+    typingEl.innerHTML = '<span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>';
+    thread.appendChild(typingEl);
+    thread.scrollTo({ top: thread.scrollHeight, behavior: reduceMotion ? 'auto' : 'smooth' });
+  }
+  function hideTyping(){
+    if (typingEl) { typingEl.remove(); typingEl = null; }
   }
 
   function appendDislikeCard(p){
@@ -364,6 +434,7 @@
       appendBubble('user', q);
       input.value = '';
       send.disabled = true;
+      showTyping();
       try {
         const resp = await fetch('/ask/reply', {
           method: 'POST',
@@ -371,6 +442,7 @@
           body: JSON.stringify({question: q}),
         });
         const data = await resp.json();
+        hideTyping();
         if (data.intent === 'dislike_pending' && data.pending) {
           if (data.answer) appendBubble('reclio', data.answer);
           appendDislikeCard(data.pending);
@@ -383,8 +455,10 @@
           appendBubble('error', data.error || 'No answer.');
         }
       } catch(e) {
+        hideTyping();
         appendBubble('error', 'Network error. Try again.');
       } finally {
+        hideTyping();
         send.disabled = false;
         input.focus();
       }

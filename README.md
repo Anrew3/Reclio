@@ -25,11 +25,14 @@ rows for [Chillio](https://chillio.app) — *Recommended For You*,
 *Because You Watched*, *Trending*, *Top Genre You'll Love*, and
 *Hidden Gems*, each split into a movies + shows pair.
 
-Behind those rows: **Recombee** collaborative filtering, **vector
-embeddings** for semantic similarity, a **watch-state machine** that
-learns from incomplete watches, an LLM-driven **conversational
-chat** ("stop showing me horror" → it actually does), and a
-recency-weighted **personality blurb** that gently roasts your taste.
+Behind those rows: a **fully local recommendation engine** — your
+interactions live in SQLite and recommendations come from
+recency-weighted taste-profile vectors scored against **vector
+embeddings** — plus a **watch-state machine** that learns from
+incomplete watches, an LLM-driven **conversational chat** ("stop
+showing me horror" → it actually does), and a recency-weighted
+**personality blurb** that gently roasts your taste. No third-party
+recommendation API: the only required keys are Trakt and TMDB.
 
 Use the public instance at [**reclio.p0xl.com**](https://reclio.p0xl.com)
 or self-host with one `docker compose up`.
@@ -37,9 +40,10 @@ or self-host with one `docker compose up`.
 ## What you get
 
 - **10 personalized rows** (5 movie + 5 show) that learn from what you watch *and* what you abandon
+- **Local-first engine** — recommendations computed on your box from your own interaction history; no recommendation SaaS, nothing to sign up for
 - **Trakt-native** — watches, ratings, watchlist, *and incomplete starts* all factor in
 - **Ask Reclio** — floating chat bubble that can answer "why am I seeing X" and act on "stop showing me Y"
-- **Personality card** — iOS Health-style donut chart of your top genres + an LLM-written one-line roast
+- **Personality card** — iOS Health-style animated donut chart of your top genres + an LLM-written one-line roast
 - **Adaptive sync** — heavy users refresh hourly, dormant users weekly, ~80% less Trakt API traffic than v1.4
 - **Always works** — every external service can fail and you still get recs
 
@@ -60,8 +64,10 @@ taste profile builds, then refresh.
 
 ## Self-host
 
-You need Docker, a domain, and four free API keys (Trakt, TMDB,
-Recombee, optionally an LLM provider). The short version:
+You need Docker, a domain, and two free API keys (Trakt + TMDB).
+The bundled Ollama container covers chat + embeddings with zero
+extra accounts, or point LLM_PROVIDER at Claude/OpenAI/OpenRouter
+if you'd rather use an API. The short version:
 
 ```bash
 git clone https://github.com/Anrew3/reclio.git && cd reclio
@@ -85,7 +91,7 @@ Full docs at **[anrew3.github.io/Reclio](https://anrew3.github.io/Reclio/)**
 | [Configuration](https://anrew3.github.io/Reclio/configuration) | Every env var, every default |
 | [Model integrations](https://anrew3.github.io/Reclio/model-integrations) | Ollama · Claude · OpenAI · OpenRouter |
 | [Embeddings](https://anrew3.github.io/Reclio/embeddings) | What they are, why we use them, provider tradeoffs |
-| [Recombee](https://anrew3.github.io/Reclio/recombee) | Collaborative-filtering deep-dive |
+| [Recommendation engine](https://anrew3.github.io/Reclio/recombee) | How the local engine works (+ legacy Recombee mode) |
 | [Watch-state machine](https://anrew3.github.io/Reclio/watch-state) | How Reclio learns from incomplete watches |
 | [API reference](https://anrew3.github.io/Reclio/api-reference) | `/manifest`, `/feeds`, `/admin/*` |
 | [Adaptive sync](https://anrew3.github.io/Reclio/adaptive-sync) | How sync cadence auto-tunes |

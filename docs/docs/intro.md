@@ -19,7 +19,7 @@ Trakt history    ─┐
 Ratings          ─┤
 Watchlist        ─┼─▶  Reclio  ─▶  Chillio (/feeds — 10 rows)
 Watch progress   ─┤    │
-Watched %        ─┘    ├─ Recombee (collaborative filtering)
+Watched %        ─┘    ├─ Local rec engine (taste-profile vectors)
                        ├─ Vector embeddings (semantic similarity)
                        ├─ Watch-state machine (incomplete-watch signal)
                        └─ LLM (chat, personality, intent classification)
@@ -33,8 +33,8 @@ Watched %        ─┘    ├─ Recombee (collaborative filtering)
   favor of a tight, repeatable layout.
 - **Trakt-native + watch-state aware** — learns from watches, ratings,
   watchlist, *and from incomplete watches* (the v1.5 watch-state
-  machine catches "fell asleep" vs "actively bounced" and signals
-  Recombee accordingly).
+  machine catches "fell asleep" vs "actively bounced" and feeds the
+  engine accordingly).
 - **Ask Reclio chat** — floating bubble on the dashboard. Ask it
   anything ("why am I seeing X?", "more thrillers please", "stop
   recommending horror") and it can actually act on the answer.
@@ -42,9 +42,8 @@ Watched %        ─┘    ├─ Recombee (collaborative filtering)
   genres + an LLM-written one-line roast.
 - **Self-hostable** — one `docker compose up` and you have your own
   instance with Caddy-managed HTTPS.
-- **Never 5xx** — every external service (Trakt, TMDB, Recombee, LLM,
-  embeddings) can fail independently and `/feeds` still returns a
-  valid response.
+- **Never 5xx** — every dependency (Trakt, TMDB, embeddings, LLM)
+  can fail independently and `/feeds` still returns a valid response.
 
 ## Two ways to use it
 
@@ -62,7 +61,7 @@ Watched %        ─┘    ├─ Recombee (collaborative filtering)
   (Ollama, Claude, OpenAI, OpenRouter)
 - [Embeddings](./embeddings) — what they are, why we use them, how to
   pick a provider
-- [Recombee](./recombee) — how the collaborative filtering works
+- [Recommendation engine](./recombee) — how the local engine works
 - [Watch-state machine](./watch-state) — how Reclio learns from
   incomplete watches
 - [API reference](./api-reference) — `/manifest`, `/feeds`, `/admin/*`
