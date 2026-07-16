@@ -11,13 +11,14 @@ slug: /
 
 Reclio is a ChillLink Protocol addon server. It reads your Trakt watch
 history (and what you *don't* finish), builds a taste profile, and
-returns **10 personalized rows** — five movie + five show pairs — to
+returns **two deeply personalized rows** — Recommended Movies +
+Recommended Shows — to
 Chillio every time the app opens.
 
 ```
 Trakt history    ─┐
 Ratings          ─┤
-Watchlist        ─┼─▶  Reclio  ─▶  Chillio (/feeds — 10 rows)
+Watchlist        ─┼─▶  Reclio  ─▶  Chillio (/feeds — 2 rows)
 Watch progress   ─┤    │
 Watched %        ─┘    ├─ Local rec engine (taste-profile vectors)
                        ├─ Vector embeddings (semantic similarity)
@@ -27,7 +28,7 @@ Watched %        ─┘    ├─ Local rec engine (taste-profile vectors)
 
 ## What you get
 
-- **10 personalized rows** — *Recommended For You*, *Because You Watched*,
+- **Two focused rows** — *Recommended Movies* and *Recommended Shows*,
   *Trending*, *Top Genre You'll Love*, and *Hidden Gems*, each as a
   movies + shows pair. Drops the v1.4 grab-bag of 22 sections in
   favor of a tight, repeatable layout.

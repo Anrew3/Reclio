@@ -232,3 +232,54 @@ async def vectors_for(item_ids: Iterable[str]) -> dict:
         if idx is not None:
             out[item_id] = _matrix[idx]
     return out
+
+
+async def catalog_scores(
+    facet_vectors: list,
+    *,
+    negative_vector=None,
+    negative_weight: float = 0.35,
+    popularity_weight: float = 0.0,
+):
+    """Score every catalog item against a multi-facet taste profile.
+
+    score_i = max_f cos(facet_f, item_i)
+              − negative_weight × max(0, cos(neg, item_i))
+              + popularity_weight × pop_norm_i
+
+    Max-over-facets is the point: a viewer with a drama facet AND an
+    action facet gets strong scores near *both*, instead of the mushy
+    midpoint a single mean vector produces.
+
+    Returns (ids, scores) — a shared reference to the catalog id list
+    plus a float32 score array aligned to it — or (None, None) when no
+    embeddings are loaded. Callers must not mutate `ids`.
+    """
+    if not facet_vectors or not await _load_matrix() or _matrix is None:
+        return None, None
+    import numpy as np
+
+    scores = None
+    for vec in facet_vectors:
+        q = np.asarray(vec, dtype=np.float32)
+        if q.shape[0] != _matrix.shape[1]:
+            continue
+        norm = float(np.linalg.norm(q))
+        if norm == 0:
+            continue
+        sims = _matrix @ (q / norm)
+        scores = sims if scores is None else np.maximum(scores, sims)
+    if scores is None:
+        return None, None
+
+    if negative_vector is not None:
+        q = np.asarray(negative_vector, dtype=np.float32)
+        norm = float(np.linalg.norm(q))
+        if norm > 0 and q.shape[0] == _matrix.shape[1]:
+            neg_sims = _matrix @ (q / norm)
+            scores = scores - negative_weight * np.clip(neg_sims, 0.0, None)
+
+    if popularity_weight and _pop is not None:
+        scores = scores + popularity_weight * _pop
+
+    return _ids, scores

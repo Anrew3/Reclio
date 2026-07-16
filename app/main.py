@@ -21,6 +21,7 @@ from app.routers import ask as ask_router
 from app.routers import chilllink as chilllink_router
 from app.routers import onboarding as onboarding_router
 from app.routers import portal as portal_router
+from app.routers import recommendations as recommendations_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,7 +81,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Reclio",
     description="ChillLink addon server: Netflix-style personalized recommendations powered by Trakt.",
-    version="1.7.0",
+    version="1.8.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
@@ -213,6 +214,7 @@ async def health() -> JSONResponse:
 app.include_router(chilllink_router.router)
 app.include_router(portal_router.router)
 app.include_router(onboarding_router.router)
+app.include_router(recommendations_router.router)
 app.include_router(ask_router.router)
 app.include_router(admin_router.router)
 

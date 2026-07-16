@@ -457,6 +457,25 @@ async def admin_similar(
     return {"seed_id": seed_id, "k": k, "media_type": media_type, "results": titled}
 
 
+@router.get("/eval")
+async def admin_eval(
+    k: int = 50,
+    holdout: int = 5,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Offline leave-last-N-out backtest of the recommendation engine.
+
+    For every user with enough embedded history: hide their most recent
+    `holdout` watches, rebuild the profile from the rest, and check
+    whether the hidden items land in the top-`k` recommendations.
+    Returns hit_rate + mean_recall plus per-user detail. Run it before
+    and after any ranking change to see whether the change helped.
+    """
+    _require_admin(x_admin_token)
+    from app.services.evaluator import evaluate
+    return await evaluate(k=k, holdout=holdout)
+
+
 @router.get("/health/history")
 async def admin_health_history(
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),

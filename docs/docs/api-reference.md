@@ -28,7 +28,7 @@ Addon metadata. Shape is protocol-fixed.
 
 ### `GET /feeds`
 
-Returns the **10-feed personalized response** (5 movie + 5 show pairs):
+Returns the **2-feed personalized response**:
 
 | Position | ID prefix | Title | Source |
 | --- | --- | --- | --- |

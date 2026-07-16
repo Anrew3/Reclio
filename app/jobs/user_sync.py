@@ -153,6 +153,7 @@ async def _enrich_catalog_for_history(
                 "media_type": media_type,
                 "cast": [c.get("name") for c in cast if c.get("name")],
                 "director": director,
+                "poster_path": full.get("poster_path"),
             }
             return item_id, props
 
@@ -184,13 +185,18 @@ async def _enrich_catalog_for_history(
         embeddings = [[] for _ in upsert_pairs]
 
     # Legacy mirror: recombee mode also pushes full item properties.
+    # poster_path is local-only — it isn't in the Recombee schema.
     failed: set[str] = set()
     mirrored = False
     if get_settings().recommender == "recombee":
         from app.services.recombee import get_recombee
         recombee = get_recombee()
         if recombee.available:
-            push_stats = await recombee.upsert_items_batch(upsert_pairs)
+            recombee_pairs = [
+                (item_id, {k: v for k, v in props.items() if k != "poster_path"})
+                for item_id, props in upsert_pairs
+            ]
+            push_stats = await recombee.upsert_items_batch(recombee_pairs)
             failed = push_stats.get("failed_ids") or set()
             mirrored = True
 
@@ -210,6 +216,7 @@ async def _enrich_catalog_for_history(
             year=props["year"],
             vote_average=props["vote_average"],
             popularity=props["popularity"],
+            poster_path=props.get("poster_path"),
             embedding_stored=bool(vec),
             recombee_synced=mirrored and item_id not in failed,
             last_updated=now,
@@ -507,113 +514,35 @@ async def sync_one_user(user_id: str, *, force: bool = False) -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("watch_state: failed for %s: %s", user_id, exc)
 
-            # 2. Pull recommendations from the engine — both the headline
-            #    "Recommended For You" and the BYW lists. Both paths
-            #    exclude what the user has already watched or blocked,
-            #    so no row ever repeats history.
+            # 2. Pull recommendations from the engine. The v1.8 pipeline
+            #    (taste facets → priors/serve-decay → MMR) handles cold
+            #    start and diversity internally, and both rows exclude
+            #    everything the user has watched or blocked.
             movie_recs: list[str] = []
             show_recs: list[str] = []
-            byw_movie_recs: list[str] = []
-            byw_show_recs: list[str] = []
-
-            taste = await session.get(TasteCache, user_id)
-            byw_movie_anchor = (
-                f"movie_{taste.last_watched_movie_tmdb_id}"
-                if taste and taste.last_watched_movie_tmdb_id else None
-            )
-            byw_show_anchor = (
-                f"tv_{taste.last_watched_show_tmdb_id}"
-                if taste and taste.last_watched_show_tmdb_id else None
-            )
-
             try:
-                coros = [
+                movie_recs, show_recs = await asyncio.gather(
                     recommender.get_recommendations(user_id, count=50, media_type="movie"),
                     recommender.get_recommendations(user_id, count=50, media_type="tv"),
-                    (
-                        recommender.get_item_recommendations(
-                            byw_movie_anchor, user_id, count=25, media_type="movie",
-                        )
-                        if byw_movie_anchor else asyncio.sleep(0, result=[])
-                    ),
-                    (
-                        recommender.get_item_recommendations(
-                            byw_show_anchor, user_id, count=25, media_type="tv",
-                        )
-                        if byw_show_anchor else asyncio.sleep(0, result=[])
-                    ),
-                ]
-                movie_recs, show_recs, byw_movie_recs, byw_show_recs = await asyncio.gather(*coros)
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("user_sync: engine recs failed for %s: %s", user_id, exc)
 
-            # 2.5. Vector-similarity blend — top up BYW lists with semantic
-            #      neighbors and seed cold-start "Recommended" rows when the
-            #      engine returned nothing useful (< 12 history items).
+            # 2.5. Log what we're about to serve — feeds the
+            #      served-but-ignored decay and the eval harness.
             try:
-                from app.services.similarity import similar_to
-                # Build a watched set so we never recommend something they
-                # already saw via the raw vector path. (The engine's own
-                # results are already watched-exclusive.)
-                watched: set[str] = set()
-                # Cheap reuse: anchor history that's already cached.
-                for h in (history_recent or []):
-                    if h.get("type") == "movie":
-                        m = h.get("movie") or {}
-                        tmdb = (m.get("ids") or {}).get("tmdb")
-                        if tmdb:
-                            watched.add(f"movie_{tmdb}")
-                    elif h.get("type") == "episode":
-                        s = h.get("show") or {}
-                        tmdb = (s.get("ids") or {}).get("tmdb")
-                        if tmdb:
-                            watched.add(f"tv_{tmdb}")
-
-                async def _blend(recs: list[str], anchor: str | None, mt: str) -> list[str]:
-                    if not anchor:
-                        return recs
-                    sim = await similar_to(anchor, k=25, exclude=watched, media_type=mt)
-                    if not sim:
-                        return recs
-                    if not recs:
-                        # Cold-start path: pure vector seed.
-                        return sim
-                    # Blended rank: engine items keep their order, then
-                    # vector items fill the tail with dedupe.
-                    seen = set(recs)
-                    blended = list(recs)
-                    for s in sim:
-                        if s not in seen:
-                            blended.append(s)
-                            seen.add(s)
-                    return blended[:50]
-
-                byw_movie_recs = await _blend(byw_movie_recs, byw_movie_anchor, "movie")
-                byw_show_recs = await _blend(byw_show_recs, byw_show_anchor, "tv")
-
-                # Cold-start "Recommended For You": if the engine gave us
-                # very little, seed from the user's last-watched anchor
-                # via vector similarity. Skip when it had real recs.
-                if len(movie_recs) < 5 and byw_movie_anchor:
-                    seed = await similar_to(byw_movie_anchor, k=30, exclude=watched, media_type="movie")
-                    if seed:
-                        movie_recs = (movie_recs or []) + [s for s in seed if s not in movie_recs]
-                        movie_recs = movie_recs[:50]
-                if len(show_recs) < 5 and byw_show_anchor:
-                    seed = await similar_to(byw_show_anchor, k=30, exclude=watched, media_type="tv")
-                    if seed:
-                        show_recs = (show_recs or []) + [s for s in seed if s not in show_recs]
-                        show_recs = show_recs[:50]
+                await recommender.log_served(
+                    user_id,
+                    [(i, "movie") for i in movie_recs] + [(i, "tv") for i in show_recs],
+                )
             except Exception as exc:  # noqa: BLE001
-                logger.debug("user_sync: similarity blend skipped for %s: %s", user_id, exc)
+                logger.debug("user_sync: serve log skipped for %s: %s", user_id, exc)
 
-            # 3. Push recs to Trakt managed lists
+            # 3. Push recs to the two managed Trakt lists
             try:
                 await asyncio.gather(
                     _refresh_managed_list(user, token, user.trakt_rec_movies_list_id, movie_recs, "movies"),
                     _refresh_managed_list(user, token, user.trakt_rec_shows_list_id, show_recs, "shows"),
-                    _refresh_managed_list(user, token, user.trakt_byw_movies_list_id, byw_movie_recs, "movies"),
-                    _refresh_managed_list(user, token, user.trakt_byw_shows_list_id, byw_show_recs, "shows"),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("user_sync: list refresh failed for %s: %s", user_id, exc)

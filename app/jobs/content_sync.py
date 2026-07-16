@@ -249,6 +249,7 @@ async def _sync_item(
         year=year,
         vote_average=full.get("vote_average"),
         popularity=full.get("popularity"),
+        poster_path=full.get("poster_path"),
         embedding_stored=bool(embedding),
         recombee_synced=False,  # flipped after batch push succeeds (recombee mode)
         last_updated=datetime.utcnow(),

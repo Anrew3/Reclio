@@ -1,0 +1,207 @@
+{% extends "base.html" %}
+{% block title %}Recommendations — Reclio{% endblock %}
+
+{% block content %}
+<header class="dashboard-header">
+  <div>
+    <p class="caption label-tertiary">Picked for</p>
+    <h1 class="title-2">{{ user.display_name or user.trakt_username or "you" }}</h1>
+  </div>
+  <a href="/dashboard" class="btn-link">← Dashboard</a>
+</header>
+
+<section class="ios-card recs-intro">
+  <p class="headline">Talk back to your recommendations</p>
+  <p class="footnote">
+    Tap 👍/👎 for a quick signal, or write what you liked or didn't —
+    "loved the slow-burn tension", "too bleak for me" — and Reclio
+    reshapes your rows on the spot{% if not llm_enabled %} (chat parsing is
+    offline; reactions still count){% endif %}.
+  </p>
+</section>
+
+{% for section in [("Recommended Movies", movies, "movie"), ("Recommended Shows", shows, "tv")] %}
+{% set section_title, items, mkind = section %}
+<section class="recs-section">
+  <h2 class="title-3 recs-section-title">{{ section_title }}</h2>
+  {% if items %}
+  <div class="recs-grid">
+    {% for item in items %}
+    <article class="rec-card" data-item-id="{{ item.item_id }}" data-title="{{ item.title }}">
+      <div class="rec-poster">
+        {% if item.poster_url %}
+          <img src="{{ item.poster_url }}" alt="{{ item.title }} poster" loading="lazy" />
+        {% else %}
+          <div class="rec-poster-fallback" aria-hidden="true">{{ item.title[0]|upper if item.title else '?' }}</div>
+        {% endif %}
+        {% if item.vote_average %}<span class="rec-score">★ {{ item.vote_average }}</span>{% endif %}
+        {% if item.feedback %}
+        <span class="rec-noted {{ 'pos' if (item.feedback.sentiment or 0) >= 0 else 'neg' }}"
+              title="{{ item.feedback.comment or 'reaction recorded' }}">
+          {{ '♥' if (item.feedback.sentiment or 0) >= 0 else '✕' }}
+        </span>
+        {% endif %}
+      </div>
+      <p class="rec-title" title="{{ item.title }}">{{ item.title }}</p>
+      <p class="rec-meta">
+        {% if item.year %}{{ item.year }}{% endif %}
+        {% if item.genres %} · {{ item.genres[0] }}{% endif %}
+      </p>
+      <div class="rec-actions" role="group" aria-label="React to {{ item.title }}">
+        <button type="button" class="rec-btn rec-up" data-quick="up" aria-label="More like this">👍</button>
+        <button type="button" class="rec-btn rec-down" data-quick="down" aria-label="Less like this">👎</button>
+        <button type="button" class="rec-btn rec-comment-toggle" aria-label="Comment on this">💬</button>
+      </div>
+    </article>
+    {% endfor %}
+  </div>
+  {% else %}
+  <div class="ios-card"><p class="callout">Nothing yet — the catalog is still
+    warming up. Check back after the next content sync.</p></div>
+  {% endif %}
+</section>
+{% endfor %}
+
+<!-- Slide-up comment sheet (one shared instance) -->
+<div id="fb-sheet" class="ask-panel fb-sheet" aria-hidden="true" role="dialog" aria-label="Comment on recommendation">
+  <div class="ask-panel-handle" aria-hidden="true"></div>
+  <header class="ask-panel-header">
+    <div>
+      <p class="caption label-tertiary">Tell Reclio</p>
+      <h3 class="title-3" id="fb-sheet-title">Title</h3>
+    </div>
+    <button type="button" id="fb-sheet-close" class="ask-panel-close" aria-label="Close">×</button>
+  </header>
+  <form id="fb-form" novalidate>
+    <textarea id="fb-input" class="ios-textarea" rows="3" maxlength="500"
+      placeholder="What did you like or dislike? e.g. “loved the slow-burn tension” or “too gory for me”"></textarea>
+    <div class="fb-actions">
+      <button type="submit" class="btn btn-primary" id="fb-send">Send</button>
+    </div>
+  </form>
+  <div id="fb-result" class="fb-result" aria-live="polite"></div>
+</div>
+<div id="fb-backdrop" class="ask-backdrop" aria-hidden="true"></div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function(){
+  var reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var sheet = document.getElementById('fb-sheet');
+  var backdrop = document.getElementById('fb-backdrop');
+  var closeBtn = document.getElementById('fb-sheet-close');
+  var form = document.getElementById('fb-form');
+  var input = document.getElementById('fb-input');
+  var send = document.getElementById('fb-send');
+  var sheetTitle = document.getElementById('fb-sheet-title');
+  var resultEl = document.getElementById('fb-result');
+  var toast = document.getElementById('toast');
+  var activeItem = null;   // {id, title, card}
+  var toastTimer = null;
+
+  function showToast(msg, kind){
+    toast.textContent = msg;
+    toast.className = 'toast show ' + (kind || '');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ toast.className = 'toast'; }, 3200);
+  }
+
+  function markCard(card, sentiment){
+    var poster = card.querySelector('.rec-poster');
+    var existing = poster.querySelector('.rec-noted');
+    if (existing) existing.remove();
+    var badge = document.createElement('span');
+    badge.className = 'rec-noted ' + (sentiment >= 0 ? 'pos' : 'neg') + ' pop';
+    badge.textContent = sentiment >= 0 ? '♥' : '✕';
+    poster.appendChild(badge);
+  }
+
+  async function submitFeedback(payload, card){
+    try {
+      var resp = await fetch('/recommendations/feedback', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      });
+      var data = await resp.json();
+      if (data.error) { showToast(data.error, 'err'); return null; }
+      if (card && typeof data.sentiment === 'number') markCard(card, data.sentiment);
+      return data;
+    } catch(e) {
+      showToast('Network error — try again.', 'err');
+      return null;
+    }
+  }
+
+  function openSheet(item){
+    activeItem = item;
+    sheetTitle.textContent = item.title;
+    resultEl.textContent = '';
+    resultEl.className = 'fb-result';
+    input.value = '';
+    sheet.classList.add('open');
+    backdrop.classList.add('open');
+    sheet.setAttribute('aria-hidden', 'false');
+    setTimeout(function(){ input.focus(); }, reduceMotion ? 0 : 250);
+  }
+  function closeSheet(){
+    sheet.classList.remove('open');
+    backdrop.classList.remove('open');
+    sheet.setAttribute('aria-hidden', 'true');
+    activeItem = null;
+  }
+  closeBtn.addEventListener('click', closeSheet);
+  backdrop.addEventListener('click', closeSheet);
+  document.addEventListener('keydown', function(ev){
+    if (ev.key === 'Escape' && sheet.classList.contains('open')) closeSheet();
+  });
+
+  form.addEventListener('submit', async function(ev){
+    ev.preventDefault();
+    if (!activeItem) return;
+    var comment = (input.value || '').trim();
+    if (!comment) { input.focus(); return; }
+    send.disabled = true;
+    send.innerHTML = '<span class="btn-spinner" aria-hidden="true"></span>Thinking…';
+    var data = await submitFeedback({item_id: activeItem.id, comment: comment}, activeItem.card);
+    send.disabled = false;
+    send.textContent = 'Send';
+    if (!data) return;
+    resultEl.className = 'fb-result show';
+    var applied = (data.applied || []).join(' · ');
+    resultEl.innerHTML = '';
+    var p = document.createElement('p');
+    p.className = 'fb-reply';
+    p.textContent = data.reply || 'Noted.';
+    resultEl.appendChild(p);
+    if (applied) {
+      var a = document.createElement('p');
+      a.className = 'fb-applied';
+      a.textContent = '✓ ' + applied;
+      resultEl.appendChild(a);
+    }
+    setTimeout(closeSheet, 2400);
+  });
+
+  document.querySelectorAll('.rec-card').forEach(function(card){
+    var id = card.getAttribute('data-item-id');
+    var title = card.getAttribute('data-title');
+    card.querySelectorAll('.rec-btn[data-quick]').forEach(function(btn){
+      btn.addEventListener('click', async function(){
+        btn.classList.add('bounce');
+        setTimeout(function(){ btn.classList.remove('bounce'); }, 400);
+        var data = await submitFeedback({item_id: id, quick: btn.getAttribute('data-quick')}, card);
+        if (data) showToast(data.reply || 'Noted.', 'ok');
+      });
+    });
+    var commentBtn = card.querySelector('.rec-comment-toggle');
+    if (commentBtn) commentBtn.addEventListener('click', function(){
+      openSheet({id: id, title: title, card: card});
+    });
+  });
+})();
+</script>
+{% endblock %}

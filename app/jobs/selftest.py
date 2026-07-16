@@ -456,7 +456,7 @@ async def _t_watch_state_machine() -> ProbeResult:
 
 
 async def _t_feed_builder() -> ProbeResult:
-    """Build the 10-feed response against synthetic user/taste/prefs."""
+    """Build the 2-feed response against synthetic user/taste/prefs."""
     t0 = time.monotonic()
     try:
         from app.services.feed_builder import build_feeds
@@ -464,8 +464,6 @@ async def _t_feed_builder() -> ProbeResult:
         class _U:
             trakt_rec_movies_list_id = 111
             trakt_rec_shows_list_id = 222
-            trakt_byw_movies_list_id = 333
-            trakt_byw_shows_list_id = 444
             trakt_watchprogress_list_id = None
             trakt_watchlist_id = None
 
@@ -494,13 +492,13 @@ async def _t_feed_builder() -> ProbeResult:
             favorite_moods: list[str] = []
 
         feeds = await build_feeds(None, _U(), _T(), prefs=_P())
-        # Should be exactly 10 (5 movie + 5 show)
+        # v1.8 layout: exactly 2 feeds (Recommended Movies + Shows)
         movie_count = sum(1 for f in feeds if f.get("content_type") == "movies")
         show_count = sum(1 for f in feeds if f.get("content_type") == "shows")
         ok = (
-            len(feeds) == 10
-            and movie_count == 5
-            and show_count == 5
+            len(feeds) == 2
+            and movie_count == 1
+            and show_count == 1
             and all(f.get("source") in ("trakt_list", "tmdb_query") for f in feeds)
         )
         return ProbeResult(

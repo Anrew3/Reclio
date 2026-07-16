@@ -25,8 +25,9 @@ Everything lives in Reclio's own SQLite database. Two tables matter:
 - **`interactions`** — one row per (user, item, kind) with a signed
   weight. Kinds: `view` (watch history), `rating` (Trakt rating,
   normalized to −1…+1), `bookmark` (watchlist), `signal` (watch-state
-  verdicts like *completed* +0.5 or *S1E1 bounce* −1.0), and `block`
-  ("never show me this" from Ask Reclio).
+  verdicts like *completed* +0.5 or *S1E1 bounce* −1.0), `feedback`
+  (reactions/comments from the /recommendations page), and `block`
+  ("never show me this").
 - **`content_catalog`** — TMDB metadata plus a vector embedding per
   title (see [Embeddings](./embeddings)). The daily content sync grows
   it from TMDB's popular/top-rated/trending lists **and** from
@@ -38,31 +39,59 @@ Everything lives in Reclio's own SQLite database. Two tables matter:
 prefix prevents collisions between movies and shows that share a TMDB
 numeric id.
 
-### Recommended For You
+### The ranking pipeline (v1.8)
+
+**1. Taste facets.** Your positively-weighted items (and positive
+comments — see below) are k-means clustered into up to 4 facets, each
+a recency-weighted mean embedding. Every catalog item scores against
+its *nearest* facet:
 
 ```
-profile = Σ  kind_weight × recency_decay(when) × embedding(item)
-score   = cosine(profile, item) + 0.15 × popularity_norm(item)
+score = max_f cos(facet_f, item) − 0.35 × max(0, cos(negative, item))
+        + 0.15 × popularity_norm − serve_decay
 ```
 
-Your profile vector is the recency-weighted mean of the embeddings of
-everything you've interacted with — positive weights pull the ranking
-toward what you finish and rate up; negative weights (bounces, blocks,
-low ratings) actively push it away from similar titles. Items you've
-watched or blocked are excluded outright. A small popularity prior
-keeps the row from drifting into obscurities, and a nine-month
-half-life makes the row chase your current mood rather than your
-2016 self.
+A viewer who loves both quiet dramas and loud action gets strong picks
+near *both* poles instead of mush at the midpoint. Negative signal
+(bounces, blocks, low ratings, critical comments) forms a separate
+repulsion vector. A nine-month half-life makes the profile chase your
+current mood rather than your 2016 self.
 
-With no usable history (cold start) the engine falls back to a
-quality-floored popularity ranking over the catalog, so the row is
-never empty.
+**2. Priors and decay.** A small popularity prior keeps the ranking
+out of the obscurity tail, and items the engine has served repeatedly
+without engagement decay a little more on every serve, so the row
+rotates instead of going stale.
 
-### Because You Watched
+**3. MMR diversity re-rank.** The final list is assembled greedily
+with maximal marginal relevance — each pick is penalized by its
+similarity to already-picked items. Your `discovery_level` preference
+drives the diversity weight.
 
-Pure semantic neighbors of your most recently finished title, from the
-same embedding matrix, minus everything you've seen or blocked. The
-whole catalog scores in a single ~30 ms NumPy matrix multiply.
+Items you've watched or blocked are excluded outright, and with no
+usable history (cold start) the engine falls back to a quality-floored
+popularity ranking, so the row is never empty.
+
+### Talk-back feedback
+
+The `/recommendations` page shows everything the engine is currently
+picking. React 👍/👎 or write a comment — "loved the slow-burn
+tension", "too gory for me". Three things happen at once:
+
+1. An LLM parses the comment into structured signal (sentiment,
+   keyword boosts/mutes, genre exclusions, hard blocks).
+2. The comment text is embedded into the *same vector space as the
+   catalog* and joins your profile with the sentiment's sign — the
+   words themselves steer future picks.
+3. A background sync refreshes the Chillio rows within seconds.
+
+With no LLM configured, a sentiment lexicon keeps 2–3 working.
+
+### Measuring changes
+
+`GET /admin/eval` runs a leave-last-N-out backtest: it hides each
+user's most recent watches, rebuilds the profile from the rest, and
+reports hit-rate + recall on the hidden items. Run it before and after
+any ranking tweak.
 
 ### Why local wins for self-hosting
 
@@ -77,9 +106,8 @@ being flattened into a rating call.
 ## Why materialize into Trakt lists?
 
 Rather than ranking on every `/feeds` hit, user sync pre-materializes
-picks into managed Trakt lists (`Reclio • Recommended Movies`,
-`Reclio • Recommended Shows`, plus the two *Because You Watched*
-lists).
+picks into two managed Trakt lists (`Reclio • Recommended Movies`,
+`Reclio • Recommended Shows`).
 
 | Concern | Live call | Materialized |
 | --- | --- | --- |
@@ -91,10 +119,9 @@ lists).
 ## Graceful degradation
 
 If the engine has nothing to say (fresh install, embeddings disabled),
-the *Recommended For You* rows fall back to a TMDB `discover` query
-filtered by the user's top genres, and *Because You Watched* falls
-back to TMDB `/movie/{id}/recommendations` for the last-watched item.
-Chillio always gets a valid 10-feed response.
+both rows fall back to a TMDB `discover` query filtered by the user's
+top genres and preferences. Chillio always gets a valid 2-feed
+response.
 
 ## Inspecting the engine
 

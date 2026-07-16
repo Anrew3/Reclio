@@ -20,15 +20,17 @@ _Connect your Trakt. Copy your addon URL. Paste into Chillio. Done._
 
 ## What it is
 
-Reclio reads your Trakt watch history and turns it into 10 personalized
-rows for [Chillio](https://chillio.app) — *Recommended For You*,
-*Because You Watched*, *Trending*, *Top Genre You'll Love*, and
-*Hidden Gems*, each split into a movies + shows pair.
+Reclio reads your Trakt watch history and turns it into two focused,
+deeply personalized rows for [Chillio](https://chillio.app) —
+**Recommended Movies** and **Recommended Shows** — plus a web portal
+where you can browse every pick and talk back ("loved the slow-burn
+tension", "too bleak for me") to reshape them on the spot.
 
 Behind those rows: a **fully local recommendation engine** — your
-interactions live in SQLite and recommendations come from
-recency-weighted taste-profile vectors scored against **vector
-embeddings** — plus a **watch-state machine** that learns from
+interactions live in SQLite; multi-facet taste profiles (k-means over
+**vector embeddings**) score the catalog, an MMR pass keeps the row
+diverse, and a built-in **offline eval harness** proves every ranking
+change with numbers. Plus a **watch-state machine** that learns from
 incomplete watches, an LLM-driven **conversational chat** ("stop
 showing me horror" → it actually does), and a recency-weighted
 **personality blurb** that gently roasts your taste. No third-party
@@ -39,7 +41,8 @@ or self-host with one `docker compose up`.
 
 ## What you get
 
-- **10 personalized rows** (5 movie + 5 show) that learn from what you watch *and* what you abandon
+- **Two focused rows** (Recommended Movies + Shows) that learn from what you watch *and* what you abandon
+- **Talk-back feedback** — browse all picks on the web portal, react or comment in plain English; an LLM parses it and the engine re-ranks immediately
 - **Local-first engine** — recommendations computed on your box from your own interaction history; no recommendation SaaS, nothing to sign up for
 - **Trakt-native** — watches, ratings, watchlist, *and incomplete starts* all factor in
 - **Ask Reclio** — floating chat bubble that can answer "why am I seeing X" and act on "stop showing me Y"
@@ -55,7 +58,7 @@ or self-host with one `docker compose up`.
 2. **Connect with Trakt** and authorize
 3. Tap **Copy** on your personal addon URL
 4. In Chillio: **Settings → ChillLink Servers → Add Server** → paste → Save
-5. Pull-to-refresh the home tab. The 10 rows appear.
+5. Pull-to-refresh the home tab. Your recommendation rows appear.
 
 First-time users see mostly generic feeds for ~2 minutes while the
 taste profile builds, then refresh.

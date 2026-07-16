@@ -260,14 +260,6 @@ async def auth_callback(
             "Reclio • Recommended Shows",
             "Auto-updated by Reclio with shows you'll love.",
         )
-        user.trakt_byw_movies_list_id = await _safe_create(
-            "Reclio • Because You Watched (Movies)",
-            "Movies similar to what you've recently watched.",
-        )
-        user.trakt_byw_shows_list_id = await _safe_create(
-            "Reclio • Because You Watched (Shows)",
-            "Shows similar to what you've recently watched.",
-        )
         user.trakt_watchprogress_list_id = await _safe_create(
             "Reclio • Watch Progress",
             "Mirrors your Trakt playback progress for Chillio.",
@@ -282,31 +274,9 @@ async def auth_callback(
                     break
         except Exception:  # noqa: BLE001
             pass
-    else:
-        # Returning user — backfill BYW lists if the columns are still null
-        # (pre-1.2 install). Idempotent: each create is skipped if the id
-        # already exists.
-        async def _backfill(field: str, name: str, desc: str) -> None:
-            if getattr(user, field, None):
-                return
-            try:
-                lst = await trakt.create_list(access_token, name, desc)
-                lid = ((lst or {}).get("ids") or {}).get("trakt")
-                if lid:
-                    setattr(user, field, lid)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Backfill %s failed: %s", field, exc)
-
-        await _backfill(
-            "trakt_byw_movies_list_id",
-            "Reclio • Because You Watched (Movies)",
-            "Movies similar to what you've recently watched.",
-        )
-        await _backfill(
-            "trakt_byw_shows_list_id",
-            "Reclio • Because You Watched (Shows)",
-            "Shows similar to what you've recently watched.",
-        )
+    # (Since v1.8, only the two "Recommended" lists are managed — the
+    # Because You Watched lists were retired with the feed simplification.
+    # Existing BYW list-id columns stay in the DB but are no longer used.)
 
     await session.commit()
 
