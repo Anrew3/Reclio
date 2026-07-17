@@ -67,6 +67,14 @@ with maximal marginal relevance — each pick is penalized by its
 similarity to already-picked items. Your `discovery_level` preference
 drives the diversity weight.
 
+**4. Preference sliders.** Eleven 0–100 sliders on the /preferences
+page tune the pipeline directly: *Spotlight* scales the popularity
+prior, *Acclaim* adds a vote-average quality prior, *Memory* sets the
+profile's recency half-life (60–730 days), and four semantic sliders —
+*Tone*, *Intensity*, *Brainpower*, *Humor* — embed their pole
+descriptions ("dark gritty…" vs "light feel-good…") into catalog space
+and bias every score along that direction. A slider at 50 is neutral.
+
 Items you've watched or blocked are excluded outright, and with no
 usable history (cold start) the engine falls back to a quality-floored
 popularity ranking, so the row is never empty.

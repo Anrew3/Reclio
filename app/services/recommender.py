@@ -104,11 +104,120 @@ def _backend() -> str:
     return get_settings().recommender
 
 
-def _recency_decay(happened_at: datetime | None) -> float:
+def _recency_decay(
+    happened_at: datetime | None,
+    half_life_days: float = _PROFILE_HALF_LIFE_DAYS,
+) -> float:
     if happened_at is None:
         return 1.0
     age_days = max(0.0, (datetime.utcnow() - happened_at).total_seconds() / 86400.0)
-    return math.pow(2.0, -age_days / _PROFILE_HALF_LIFE_DAYS)
+    return math.pow(2.0, -age_days / half_life_days)
+
+
+# ============================================================
+# Preference sliders → engine parameters
+# ============================================================
+
+# Semantic-anchor sliders: each biases the ranking along the embedding
+# direction between two pole descriptions. The pole texts are embedded
+# once per provider and cached.
+_ANCHOR_SLIDERS: dict[str, tuple[str, str]] = {
+    "tone_preference": (
+        "dark gritty bleak disturbing grim tragedy",
+        "light fun feel-good heartwarming uplifting charming",
+    ),
+    "intensity_preference": (
+        "cozy gentle calm relaxing comforting low-stakes",
+        "intense thrilling suspenseful edge-of-your-seat adrenaline",
+    ),
+    "complexity_preference": (
+        "simple accessible easy-watching crowd-pleaser straightforward",
+        "cerebral complex layered thought-provoking philosophical ambiguous",
+    ),
+    "humor_preference": (
+        "serious dramatic somber earnest heavy",
+        "hilarious funny comedy witty laugh-out-loud absurd",
+    ),
+}
+
+# Max score nudge a semantic slider can apply at its extreme. Cosine
+# scores live in roughly [-1, 1], so 0.12 shifts rankings noticeably
+# without letting one slider steamroll the taste profile.
+_ANCHOR_MAX_WEIGHT = 0.12
+
+# Module cache: (provider_name, text) → normalized ndarray | None.
+_anchor_cache: dict[tuple[str, str], Any] = {}
+
+
+async def _anchor_vector(text: str):
+    """Embed a pole description into catalog space (cached)."""
+    from app.services.embeddings import embed_text, get_embeddings_provider
+    key = (get_embeddings_provider().name, text)
+    if key in _anchor_cache:
+        return _anchor_cache[key]
+    vec = None
+    try:
+        raw = await embed_text(text)
+        if raw:
+            import numpy as np
+            arr = np.asarray(raw, dtype=np.float32)
+            norm = float(np.linalg.norm(arr))
+            if norm > 0:
+                vec = arr / norm
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("recommender: anchor embed failed: %s", exc)
+    _anchor_cache[key] = vec
+    return vec
+
+
+async def _slider_biases(prefs: UserPreferences | None) -> list[tuple[Any, float]]:
+    """Active semantic sliders → [(direction_vector, signed_weight)].
+
+    A slider at 50 is neutral (no bias). The direction is the normalized
+    difference high_pole − low_pole; the weight is proportional to how
+    far the slider sits from center. Skipped gracefully when embeddings
+    are unavailable or the anchor dims don't match the catalog.
+    """
+    if prefs is None:
+        return []
+    import numpy as np
+    biases: list[tuple[Any, float]] = []
+    for field, (low_text, high_text) in _ANCHOR_SLIDERS.items():
+        value = getattr(prefs, field, None)
+        if value is None:
+            continue
+        offset = (max(0, min(100, value)) - 50) / 50.0  # -1 … +1
+        if abs(offset) < 0.1:
+            continue
+        low_vec = await _anchor_vector(low_text)
+        high_vec = await _anchor_vector(high_text)
+        if low_vec is None or high_vec is None:
+            continue
+        direction = high_vec - low_vec
+        norm = float(np.linalg.norm(direction))
+        if norm == 0:
+            continue
+        biases.append((direction / norm, _ANCHOR_MAX_WEIGHT * offset))
+    return biases
+
+
+def _popularity_weight(prefs: UserPreferences | None) -> float:
+    """mainstream_level 0..100 → popularity prior 0.0..0.30 (50 → 0.15)."""
+    return 0.30 * (_pref_level(prefs, "mainstream_level") / 100.0)
+
+
+def _quality_weight(prefs: UserPreferences | None) -> float:
+    """acclaim_level 0..100 → vote-quality boost 0.0..0.24 (50 → 0.12)."""
+    return 0.24 * (_pref_level(prefs, "acclaim_level") / 100.0)
+
+
+def _half_life_days(prefs: UserPreferences | None) -> float:
+    """memory_horizon 0..100 → profile half-life 60..730 days.
+
+    Exponential interpolation so the midpoint lands near the historical
+    default (~270 days): 60 × (730/60)^(v/100).
+    """
+    return 60.0 * math.pow(730.0 / 60.0, _pref_level(prefs, "memory_horizon") / 100.0)
 
 
 # ============================================================
@@ -345,6 +454,7 @@ def _unpack_vec(blob: bytes, dim: int):
 async def _weighted_vectors(
     inters: list[Interaction],
     feedback: list[RecFeedback],
+    half_life_days: float = _PROFILE_HALF_LIFE_DAYS,
 ) -> list[tuple[Any, float]]:
     """Collect (embedding, signed contribution) pairs for the profile.
 
@@ -365,7 +475,8 @@ async def _weighted_vectors(
         vec = vecs.get(i.item_id)
         if vec is None:
             continue
-        w = _KIND_FACTOR.get(i.kind, 1.0) * float(i.weight) * _recency_decay(i.happened_at)
+        w = (_KIND_FACTOR.get(i.kind, 1.0) * float(i.weight)
+             * _recency_decay(i.happened_at, half_life_days))
         if w != 0.0:
             pairs.append((vec, w))
 
@@ -381,7 +492,8 @@ async def _weighted_vectors(
         norm = float(np.linalg.norm(vec))
         if norm == 0:
             continue
-        w = _COMMENT_FACTOR * float(fb.sentiment) * _recency_decay(fb.created_at)
+        w = (_COMMENT_FACTOR * float(fb.sentiment)
+             * _recency_decay(fb.created_at, half_life_days))
         if w != 0.0:
             pairs.append((vec / norm, w))
 
@@ -507,10 +619,17 @@ def _mmr_select(
     return selected[:count]
 
 
+def _pref_level(prefs: UserPreferences | None, field: str) -> int:
+    """Slider value with None-safe default — 0 is a real value, not "unset"."""
+    if prefs is None:
+        return 50
+    value = getattr(prefs, field, None)
+    return 50 if value is None else max(0, min(100, int(value)))
+
+
 def _diversity_from_prefs(prefs: UserPreferences | None) -> float:
     """discovery_level 0..100 → MMR diversity weight 0.10..0.45."""
-    level = 50 if prefs is None else max(0, min(100, prefs.discovery_level or 50))
-    return 0.10 + 0.35 * (level / 100.0)
+    return 0.10 + 0.35 * (_pref_level(prefs, "discovery_level") / 100.0)
 
 
 async def rank_for_interactions(
@@ -522,11 +641,18 @@ async def rank_for_interactions(
     media_type: str | None = None,
     diversity: float = 0.25,
     serve_counts: dict[str, int] | None = None,
+    prefs: UserPreferences | None = None,
 ) -> list[str]:
     """Core ranking, decoupled from storage so the eval harness can
     inject held-out interaction subsets. Returns ranked item ids
-    (embedding path only — no popularity fallback here)."""
-    pairs = await _weighted_vectors(inters, feedback)
+    (embedding path only — no popularity fallback here).
+
+    `prefs` feeds the engine sliders: mainstream_level (popularity
+    prior), acclaim_level (quality prior), memory_horizon (profile
+    half-life), and the semantic-anchor sliders (tone / intensity /
+    complexity / humor). None → historical defaults.
+    """
+    pairs = await _weighted_vectors(inters, feedback, _half_life_days(prefs))
     if not pairs:
         return []
     facets, neg_vec = _build_facets(pairs)
@@ -537,7 +663,9 @@ async def rank_for_interactions(
         facets,
         negative_vector=neg_vec,
         negative_weight=_NEGATIVE_WEIGHT,
-        popularity_weight=_POPULARITY_WEIGHT,
+        popularity_weight=_popularity_weight(prefs),
+        quality_weight=_quality_weight(prefs),
+        bias_vectors=await _slider_biases(prefs),
     )
     if ids is None:
         return []
@@ -618,6 +746,7 @@ async def recommend_for_user(
         media_type=media_type,
         diversity=_diversity_from_prefs(prefs),
         serve_counts=serve_counts,
+        prefs=prefs,
     )
 
     if len(ranked) < count:

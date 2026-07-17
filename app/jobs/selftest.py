@@ -486,6 +486,13 @@ async def _t_feed_builder() -> ProbeResult:
             pacing_preference = 50
             runtime_preference = 50
             discovery_level = 50
+            mainstream_level = 50
+            acclaim_level = 50
+            memory_horizon = 50
+            tone_preference = 50
+            intensity_preference = 50
+            complexity_preference = 50
+            humor_preference = 50
             boosted_keywords: list[str] = []
             excluded_keywords: list[str] = []
             blocked_titles: list[dict] = []

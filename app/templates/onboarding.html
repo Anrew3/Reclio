@@ -61,10 +61,17 @@
       a specific direction.</p>
 
     {% set sliders = [
-      {"name": "era_preference",      "label": "Era",        "low": "Classics",   "high": "Brand new",   "value": prefs.era_preference},
-      {"name": "pacing_preference",   "label": "Pacing",     "low": "Slow burn",  "high": "Action-packed","value": prefs.pacing_preference},
-      {"name": "runtime_preference",  "label": "Length",     "low": "Tight",      "high": "Epic",        "value": prefs.runtime_preference},
-      {"name": "discovery_level",     "label": "Discovery",  "low": "Comfort",    "high": "Push limits", "value": prefs.discovery_level},
+      {"name": "era_preference",        "label": "Era",        "low": "Classics",         "high": "Brand new",      "value": prefs.era_preference},
+      {"name": "pacing_preference",     "label": "Pacing",     "low": "Slow burn",        "high": "Action-packed",  "value": prefs.pacing_preference},
+      {"name": "runtime_preference",    "label": "Length",     "low": "Tight",            "high": "Epic",           "value": prefs.runtime_preference},
+      {"name": "discovery_level",       "label": "Discovery",  "low": "Comfort",          "high": "Push limits",    "value": prefs.discovery_level},
+      {"name": "mainstream_level",      "label": "Spotlight",  "low": "Hidden gems",      "high": "Blockbusters",   "value": prefs.mainstream_level},
+      {"name": "acclaim_level",         "label": "Acclaim",    "low": "Guilty pleasures", "high": "Critics' picks", "value": prefs.acclaim_level},
+      {"name": "tone_preference",       "label": "Tone",       "low": "Dark & gritty",    "high": "Light & warm",   "value": prefs.tone_preference},
+      {"name": "intensity_preference",  "label": "Intensity",  "low": "Cozy & calm",      "high": "Edge-of-seat",   "value": prefs.intensity_preference},
+      {"name": "complexity_preference", "label": "Brainpower", "low": "Easy watching",    "high": "Cerebral",       "value": prefs.complexity_preference},
+      {"name": "humor_preference",      "label": "Humor",      "low": "Dead serious",     "high": "Make me laugh",  "value": prefs.humor_preference},
+      {"name": "memory_horizon",        "label": "Memory",     "low": "Current mood",     "high": "All-time taste", "value": prefs.memory_horizon},
     ] %}
 
     {% for s in sliders %}
@@ -166,10 +173,17 @@
   });
   // Live slider label updates ("Classics" / "Balanced" / "Brand new")
   const sliderLabels = {
-    era_preference:     ['Classics', 'Balanced', 'Brand new'],
-    pacing_preference:  ['Slow burn', 'Balanced', 'Action-packed'],
-    runtime_preference: ['Tight', 'Balanced', 'Epic'],
-    discovery_level:    ['Comfort', 'Balanced', 'Push limits'],
+    era_preference:        ['Classics', 'Balanced', 'Brand new'],
+    pacing_preference:     ['Slow burn', 'Balanced', 'Action-packed'],
+    runtime_preference:    ['Tight', 'Balanced', 'Epic'],
+    discovery_level:       ['Comfort', 'Balanced', 'Push limits'],
+    mainstream_level:      ['Hidden gems', 'Balanced', 'Blockbusters'],
+    acclaim_level:         ['Guilty pleasures', 'Balanced', "Critics' picks"],
+    tone_preference:       ['Dark & gritty', 'Balanced', 'Light & warm'],
+    intensity_preference:  ['Cozy & calm', 'Balanced', 'Edge-of-seat'],
+    complexity_preference: ['Easy watching', 'Balanced', 'Cerebral'],
+    humor_preference:      ['Dead serious', 'Balanced', 'Make me laugh'],
+    memory_horizon:        ['Current mood', 'Balanced', 'All-time taste'],
   };
   window._reclioReadout = function(name, value){
     const out = document.querySelector('[data-out="out-' + name + '"]');

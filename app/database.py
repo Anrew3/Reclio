@@ -187,6 +187,15 @@ async def _migrate_add_preference_columns(conn) -> None:
             text("ALTER TABLE user_preferences ADD COLUMN blocked_titles JSON")
         )
         logger.info("migration: added user_preferences.blocked_titles column")
+    # v1.8.1 engine sliders
+    for col in ("mainstream_level", "acclaim_level", "memory_horizon",
+                "tone_preference", "intensity_preference",
+                "complexity_preference", "humor_preference"):
+        if col not in existing_cols:
+            await conn.execute(text(
+                f"ALTER TABLE user_preferences ADD COLUMN {col} INTEGER DEFAULT 50"
+            ))
+            logger.info("migration: added user_preferences.%s column", col)
 
 
 async def _backfill_accounts_for_orphan_users() -> None:

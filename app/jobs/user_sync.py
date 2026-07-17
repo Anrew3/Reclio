@@ -259,6 +259,29 @@ async def _push_interactions(
             await recombee.add_user(user_id)
     trakt = get_trakt()
 
+    # One-time backfill: if the local store has no `view` rows for this
+    # user (fresh install, or an upgrade from pre-1.7 where history only
+    # ever went to Recombee), ignore the delta cutoff so the full watch
+    # history lands in the engine. Without this, `last_history_sync`
+    # from the old version silently filters every historical watch and
+    # the profile is built from ratings alone.
+    if since is not None:
+        from sqlalchemy import func
+        from app.models.interaction import Interaction
+        async with session_scope() as check_session:
+            view_count = await check_session.scalar(
+                select(func.count()).select_from(Interaction).where(
+                    Interaction.user_id == user_id,
+                    Interaction.kind == "view",
+                )
+            )
+        if not view_count:
+            logger.info(
+                "user_sync: no local view history for %s — running full "
+                "history backfill (ignoring delta cutoff)", user_id,
+            )
+            since = None
+
     # gather with return_exceptions=True never raises — it inlines exceptions.
     fetched = await asyncio.gather(
         trakt.get_watch_history(access_token, limit=500, media_type="movies"),
@@ -538,7 +561,30 @@ async def sync_one_user(user_id: str, *, force: bool = False) -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("user_sync: serve log skipped for %s: %s", user_id, exc)
 
-            # 3. Push recs to the two managed Trakt lists
+            # 3. Push recs to the two managed Trakt lists.
+            #    Self-heal first: accounts from failed signups or old
+            #    installs can have NULL list ids, which silently
+            #    downgrades /feeds to the discover fallback — Chillio
+            #    then never sees the engine's picks at all.
+            for field, name, desc in (
+                ("trakt_rec_movies_list_id", "Reclio • Recommended Movies",
+                 "Auto-updated by Reclio with movies you'll love."),
+                ("trakt_rec_shows_list_id", "Reclio • Recommended Shows",
+                 "Auto-updated by Reclio with shows you'll love."),
+            ):
+                if getattr(user, field, None):
+                    continue
+                try:
+                    lst = await trakt.create_list(token, name, desc)
+                    lid = ((lst or {}).get("ids") or {}).get("trakt")
+                    if lid:
+                        setattr(user, field, lid)
+                        logger.info("user_sync: created missing managed list "
+                                    "%s=%s for %s", field, lid, user_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("user_sync: creating %s failed for %s: %s",
+                                   field, user_id, exc)
+
             try:
                 await asyncio.gather(
                     _refresh_managed_list(user, token, user.trakt_rec_movies_list_id, movie_recs, "movies"),
