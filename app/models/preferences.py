@@ -34,6 +34,29 @@ class UserPreferences(Base):
     pacing_preference: Mapped[int] = mapped_column(Integer, default=50)
     runtime_preference: Mapped[int] = mapped_column(Integer, default=50)
 
+    # --- v1.8.1 engine sliders — these drive the local ranker directly
+    # (see recommender.rank_for_interactions), not just the TMDB
+    # fallback queries.
+    #   mainstream_level:      0 = hidden gems      → 100 = blockbusters
+    #                          (scales the popularity prior)
+    #   acclaim_level:         0 = guilty pleasures → 100 = critically adored
+    #                          (vote-average quality boost)
+    #   memory_horizon:        0 = current mood     → 100 = all-time taste
+    #                          (profile recency half-life, 60 → 730 days)
+    # Semantic-anchor sliders — bias scores along an embedding direction
+    # between two pole descriptions:
+    #   tone_preference:       0 = dark & gritty    → 100 = light & feel-good
+    #   intensity_preference:  0 = cozy & calm      → 100 = edge-of-seat
+    #   complexity_preference: 0 = easy watching    → 100 = cerebral
+    #   humor_preference:      0 = dead serious     → 100 = make me laugh
+    mainstream_level: Mapped[int] = mapped_column(Integer, default=50)
+    acclaim_level: Mapped[int] = mapped_column(Integer, default=50)
+    memory_horizon: Mapped[int] = mapped_column(Integer, default=50)
+    tone_preference: Mapped[int] = mapped_column(Integer, default=50)
+    intensity_preference: Mapped[int] = mapped_column(Integer, default=50)
+    complexity_preference: Mapped[int] = mapped_column(Integer, default=50)
+    humor_preference: Mapped[int] = mapped_column(Integer, default=50)
+
     # Genre IDs (TMDB) the user wants completely filtered out.
     # Lists are intentionally separate per media type because TMDB uses
     # different ID spaces (e.g. 10759 = TV "Action & Adventure" doesn't

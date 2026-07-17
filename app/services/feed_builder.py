@@ -118,6 +118,15 @@ def _prefs_extra_params(
     elif runtime >= 75:
         parts.append("with_runtime.gte=130")
 
+    # v1.8.1 engine sliders — the local ranker consumes these directly;
+    # here they only shape the TMDB fallback for not-yet-synced users.
+    acclaim = max(0, min(100, getattr(prefs, "acclaim_level", 50) or 50))
+    if acclaim >= 70:
+        parts.append("vote_average.gte=7&vote_count.gte=200")
+    mainstream = max(0, min(100, getattr(prefs, "mainstream_level", 50) or 50))
+    if mainstream <= 30:
+        parts.append("vote_count.gte=100&popularity.lte=40")
+
     return ("&" + "&".join(parts)) if parts else ""
 
 

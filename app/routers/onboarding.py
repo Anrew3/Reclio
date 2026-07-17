@@ -177,6 +177,14 @@ async def onboarding_save(
     prefs.pacing_preference = _slider("pacing_preference", prefs.pacing_preference)
     prefs.runtime_preference = _slider("runtime_preference", prefs.runtime_preference)
     prefs.discovery_level = _slider("discovery_level", prefs.discovery_level)
+    # v1.8.1 engine sliders — these feed the local ranker directly.
+    prefs.mainstream_level = _slider("mainstream_level", prefs.mainstream_level)
+    prefs.acclaim_level = _slider("acclaim_level", prefs.acclaim_level)
+    prefs.memory_horizon = _slider("memory_horizon", prefs.memory_horizon)
+    prefs.tone_preference = _slider("tone_preference", prefs.tone_preference)
+    prefs.intensity_preference = _slider("intensity_preference", prefs.intensity_preference)
+    prefs.complexity_preference = _slider("complexity_preference", prefs.complexity_preference)
+    prefs.humor_preference = _slider("humor_preference", prefs.humor_preference)
 
     # If the LLM is configured, ask it to derive structured prefs.
     # Otherwise we keep whatever values prefs already has — the family-safe

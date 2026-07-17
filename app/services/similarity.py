@@ -38,6 +38,7 @@ _matrix = None        # numpy.ndarray, shape (N, dim), dtype float32, L2-normali
 _ids: list[str] = []  # parallel id list (e.g. "movie_550")
 _id_index: dict[str, int] = {}
 _pop = None           # numpy.ndarray, shape (N,), popularity normalized to [0, 1]
+_quality = None       # numpy.ndarray, shape (N,), vote_average mapped to [0, 1]
 _loaded_at: float = 0.0
 _lock = asyncio.Lock()
 
@@ -58,7 +59,7 @@ async def _load_matrix() -> bool:
     (e.g. embeddings disabled, or content_sync hasn't run yet).
     Idempotent + lock-protected.
     """
-    global _matrix, _ids, _id_index, _pop, _loaded_at
+    global _matrix, _ids, _id_index, _pop, _quality, _loaded_at
 
     if _matrix is not None and (time.monotonic() - _loaded_at) < _CACHE_TTL_SEC:
         return True
@@ -73,15 +74,17 @@ async def _load_matrix() -> bool:
             logger.warning("similarity: numpy not available; disabling.")
             return False
 
-        rows: list[tuple[str, bytes, int, float]] = []
+        rows: list[tuple[str, bytes, int, float, float]] = []
         async with session_scope() as session:
             q = select(
                 ContentCatalog.tmdb_id, ContentCatalog.embedding,
                 ContentCatalog.embedding_dim, ContentCatalog.popularity,
+                ContentCatalog.vote_average,
             ).where(ContentCatalog.embedding.is_not(None))
-            for tmdb_id, blob, dim, popularity in (await session.execute(q)).all():
+            for tmdb_id, blob, dim, popularity, vote in (await session.execute(q)).all():
                 if blob and dim:
-                    rows.append((tmdb_id, blob, dim, float(popularity or 0.0)))
+                    rows.append((tmdb_id, blob, dim,
+                                 float(popularity or 0.0), float(vote or 0.0)))
 
         if not rows:
             logger.info("similarity: no embeddings stored yet")
@@ -91,7 +94,7 @@ async def _load_matrix() -> bool:
         # changed mid-fleet, e.g. switched LLM_PROVIDER and not all items
         # re-embedded yet).
         from collections import Counter
-        dim_mode = Counter(d for _, _, d, _ in rows).most_common(1)[0][0]
+        dim_mode = Counter(d for _, _, d, _, _ in rows).most_common(1)[0][0]
         rows = [r for r in rows if r[2] == dim_mode]
 
         ids = [r[0] for r in rows]
@@ -112,10 +115,17 @@ async def _load_matrix() -> bool:
         span = float(pop.max() - pop.min())
         pop = (pop - pop.min()) / span if span > 0 else np.zeros_like(pop)
 
+        # Quality prior: TMDB vote_average mapped so 5.0 → 0 and 9.5+ → 1.
+        quality = np.clip(
+            (np.array([r[4] for r in rows], dtype=np.float32) - 5.0) / 4.5,
+            0.0, 1.0,
+        )
+
         _matrix = mat
         _ids = ids
         _id_index = {i: n for n, i in enumerate(ids)}
         _pop = pop
+        _quality = quality
         _loaded_at = time.monotonic()
         logger.info(
             "similarity: loaded %d embeddings × %d dims (%.1f MB)",
@@ -126,11 +136,12 @@ async def _load_matrix() -> bool:
 
 def invalidate() -> None:
     """Drop the cached matrix. Called after catalog writes add embeddings."""
-    global _matrix, _ids, _id_index, _pop, _loaded_at
+    global _matrix, _ids, _id_index, _pop, _quality, _loaded_at
     _matrix = None
     _ids = []
     _id_index = {}
     _pop = None
+    _quality = None
     _loaded_at = 0.0
 
 
@@ -240,12 +251,16 @@ async def catalog_scores(
     negative_vector=None,
     negative_weight: float = 0.35,
     popularity_weight: float = 0.0,
+    quality_weight: float = 0.0,
+    bias_vectors: list | None = None,
 ):
     """Score every catalog item against a multi-facet taste profile.
 
     score_i = max_f cos(facet_f, item_i)
               − negative_weight × max(0, cos(neg, item_i))
               + popularity_weight × pop_norm_i
+              + quality_weight × vote_norm_i
+              + Σ_b  w_b × cos(bias_b, item_i)      (preference sliders)
 
     Max-over-facets is the point: a viewer with a drama facet AND an
     action facet gets strong scores near *both*, instead of the mushy
@@ -281,5 +296,18 @@ async def catalog_scores(
 
     if popularity_weight and _pop is not None:
         scores = scores + popularity_weight * _pop
+
+    if quality_weight and _quality is not None:
+        scores = scores + quality_weight * _quality
+
+    # Signed semantic biases — each (vector, weight) nudges the whole
+    # ranking along an embedding direction (preference sliders).
+    for bias_vec, bias_w in (bias_vectors or []):
+        if not bias_w:
+            continue
+        q = np.asarray(bias_vec, dtype=np.float32)
+        norm = float(np.linalg.norm(q))
+        if norm > 0 and q.shape[0] == _matrix.shape[1]:
+            scores = scores + float(bias_w) * (_matrix @ (q / norm))
 
     return _ids, scores
