@@ -21,6 +21,7 @@ from app.routers import ask as ask_router
 from app.routers import chilllink as chilllink_router
 from app.routers import onboarding as onboarding_router
 from app.routers import portal as portal_router
+from app.routers import recommendations as recommendations_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,21 +39,22 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
-    # Vector store — lazy init on first use, but prime it in background
+    # Heavy bits init lazily on first use, but prime them in background
     async def _warmup():
         try:
-            from app.services import vector_store
+            from app.services import similarity
 
-            await vector_store._init()  # noqa: SLF001
+            await similarity._load_matrix()  # noqa: SLF001
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Vector store warmup failed: %s", exc)
+            logger.warning("Similarity matrix warmup failed: %s", exc)
 
-        try:
-            from app.services.recombee import get_recombee
+        if settings.recommender == "recombee":
+            try:
+                from app.services.recombee import get_recombee
 
-            await get_recombee().initialize_schema()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Recombee schema init failed: %s", exc)
+                await get_recombee().initialize_schema()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Recombee schema init failed: %s", exc)
 
         try:
             from app.services.llm import get_llm
@@ -79,7 +81,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Reclio",
     description="ChillLink addon server: Netflix-style personalized recommendations powered by Trakt.",
-    version="1.6.8",
+    version="1.8.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url=None,
@@ -100,7 +102,7 @@ app.add_middleware(
 # is capped at ~2.5s and runs in parallel so the whole call stays < 3s.
 #
 # 200 = container should keep running.  503 = container is genuinely broken.
-# Only the database failing is "broken" — Trakt/TMDB/Recombee/LLM going dark
+# Only the database failing is "broken" — Trakt/TMDB/engine/LLM going dark
 # leaves the app degraded-but-functional (cached data still serves /feeds),
 # so they show up as `ok: false` in the body but don't trip the HTTP code.
 
@@ -150,11 +152,26 @@ async def _check_tmdb() -> dict[str, Any]:
         return {"ok": False, "error": str(exc)[:160]}
 
 
-async def _check_recombee() -> dict[str, Any]:
-    try:
-        from app.services.recombee import get_recombee
+async def _check_engine() -> dict[str, Any]:
+    """Recommendation engine status.
 
-        return {"ok": get_recombee().available}
+    local mode: healthy when the catalog has embedded items to rank
+    (an empty catalog is expected on first boot — degraded, not fatal).
+    recombee mode: healthy when the SDK client initialized.
+    """
+    try:
+        from app.services.recommender import engine_status
+
+        status = await asyncio.wait_for(engine_status(), timeout=_HEALTH_TIMEOUT)
+        if status["backend"] == "recombee":
+            return {"ok": bool(status.get("recombee_available")), **status}
+        ok = (status.get("catalog_embedded") or 0) > 0
+        if not ok:
+            status["hint"] = (
+                "no embedded catalog items yet — content_sync populates "
+                "them on its first run (or POST /admin/sync/content)"
+            )
+        return {"ok": ok, **status}
     except Exception as exc:  # noqa: BLE001
         return {"ok": False, "error": str(exc)[:160]}
 
@@ -173,14 +190,14 @@ async def _check_llm() -> dict[str, Any]:
 
 @app.get("/health")
 async def health() -> JSONResponse:
-    db, trakt, tmdb, recombee, llm = await asyncio.gather(
+    db, trakt, tmdb, engine, llm = await asyncio.gather(
         _check_db(),
         _check_trakt(),
         _check_tmdb(),
-        _check_recombee(),
+        _check_engine(),
         _check_llm(),
     )
-    checks = {"db": db, "trakt": trakt, "tmdb": tmdb, "recombee": recombee, "llm": llm}
+    checks = {"db": db, "trakt": trakt, "tmdb": tmdb, "engine": engine, "llm": llm}
     # Only DB failure marks the container unhealthy — every other backend has
     # a graceful-degradation path inside the app.
     healthy = bool(db.get("ok"))
@@ -197,6 +214,7 @@ async def health() -> JSONResponse:
 app.include_router(chilllink_router.router)
 app.include_router(portal_router.router)
 app.include_router(onboarding_router.router)
+app.include_router(recommendations_router.router)
 app.include_router(ask_router.router)
 app.include_router(admin_router.router)
 

@@ -29,13 +29,13 @@ sync_one_user(user_id):
   build_taste_profile(...)
   _push_interactions(...)
   evaluate_watch_state(user_id, token)    ← here
-  recombee.get_recommendations(...)
+  engine.get_recommendations(...)
   _refresh_managed_list(...)
 ```
 
 It inherits the [adaptive cadence](./adaptive-sync) — hot users (1h), default (6h), cold (24h), dormant (weekly). Same per-user lock prevents overlapping evaluations.
 
-Critical ordering: feedback signals (`Recombee.AddRating(-X)`, taste cache invalidation) land *before* the next `get_recommendations` call. So a verdict reached this tick already affects this tick's recommendations.
+Critical ordering: feedback signals (engine signal writes, taste cache invalidation) land *before* the next `get_recommendations` call. So a verdict reached this tick already affects this tick's recommendations.
 
 ## The decision tree
 
@@ -62,9 +62,9 @@ For shows it's per-episode with show-level context:
 
 The S1E1 bounce gets the strongest signal in the entire system: `AddRating(-1.0)` on the show. Rationale — they sat down to try a new show, didn't finish 20 minutes, walked away. That's the loudest "no" anyone can give.
 
-## Recombee signal feedback
+## Engine signal feedback
 
-| Verdict | Recombee push | Taste profile change |
+| Verdict | Engine signal | Taste profile change |
 |---|---|---|
 | `completed` (movie) | `AddRating(+0.5)` | (already implicit via `/sync/history` push) |
 | `accidental` | none | none |
@@ -133,7 +133,7 @@ Returns:
 
 ## Hourly background sanity check
 
-Independent of the watch-state machine, an [hourly health-check job](./api-reference#diagnostics-added-in-v15) probes every external dependency (DB, Trakt, TMDB, Recombee, LLM) and logs a single WARNING with full diagnostic detail when anything degrades. Recovery shows up as INFO. Healthy installs produce zero WARNING-level lines.
+Independent of the watch-state machine, an [hourly health-check job](./api-reference#diagnostics-added-in-v15) probes every dependency (DB, Trakt, TMDB, engine, LLM) and logs a single WARNING with full diagnostic detail when anything degrades. Recovery shows up as INFO. Healthy installs produce zero WARNING-level lines.
 
 State transitions:
 

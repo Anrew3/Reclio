@@ -119,6 +119,12 @@ async def _migrate_add_v15_content_embedding_columns(conn) -> None:
             text("ALTER TABLE content_catalog ADD COLUMN embedding_at DATETIME")
         )
         logger.info("migration: added content_catalog.embedding_at column")
+    # v1.8: poster path for the /recommendations page
+    if "poster_path" not in existing_cols:
+        await conn.execute(
+            text("ALTER TABLE content_catalog ADD COLUMN poster_path VARCHAR")
+        )
+        logger.info("migration: added content_catalog.poster_path column")
 
 
 async def _migrate_add_taste_cache_columns(conn) -> None:

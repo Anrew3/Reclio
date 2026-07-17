@@ -30,7 +30,7 @@ from app.models.account import Account
 from app.models.content import ContentCatalog
 from app.models.user import User
 from app.models.watch_attempt import WatchAttempt
-from app.services.recombee import get_recombee
+from app.services import recommender
 from app.services.similarity import similar_to
 
 logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ async def admin_status(
 ) -> dict[str, Any]:
     _require_admin(x_admin_token)
 
-    recombee = get_recombee()
+    engine = await recommender.engine_status()
 
     async with session_scope() as session:
         account_count = await session.scalar(select(func.count()).select_from(Account))
@@ -155,7 +155,7 @@ async def admin_status(
         )
 
     return {
-        "recombee": {"available": recombee.available},
+        "engine": engine,
         "accounts": {
             "total": account_count or 0,
             "with_multiple_members": family_accounts_count or 0,
@@ -175,39 +175,34 @@ async def admin_status(
     }
 
 
-@router.get("/recombee/preview/{user_id}")
-async def recombee_preview(
+@router.get("/engine/preview/{user_id}")
+@router.get("/recombee/preview/{user_id}")  # legacy path alias
+async def engine_preview(
     user_id: str = Path(..., min_length=8, max_length=64),
     count: int = 10,
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
 ) -> dict[str, Any]:
-    """Return Recombee's raw recommendations for a user, split by media type.
+    """Return the engine's raw recommendations for a user, split by media type.
 
     Useful for sanity-checking what the rec engine is producing without
     waiting for the next user_sync sweep to materialize a Trakt list.
 
     Item IDs are Reclio's internal format (`movie_<tmdb_id>` / `tv_<tmdb_id>`).
-    Empty lists usually mean the user hasn't been synced yet, or Recombee
-    hasn't seen enough interactions to recommend anything.
+    Empty lists usually mean the user hasn't been synced yet or the
+    catalog has no embedded items (run POST /admin/sync/content).
     """
     _require_admin(x_admin_token)
     user_id = _validate_user_id(user_id)
     count = max(1, min(50, count))
 
-    recombee = get_recombee()
-    if not recombee.available:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="recombee unavailable (check RECOMBEE_DATABASE_ID / RECOMBEE_PRIVATE_TOKEN)",
-        )
-
     movies, shows = await asyncio.gather(
-        recombee.get_recommendations(user_id, count=count, filter_media_type="movie"),
-        recombee.get_recommendations(user_id, count=count, filter_media_type="tv"),
+        recommender.get_recommendations(user_id, count=count, media_type="movie"),
+        recommender.get_recommendations(user_id, count=count, media_type="tv"),
     )
     return {
         "user_id": user_id,
         "count": count,
+        "backend": get_settings().recommender,
         "movies": movies,
         "shows": shows,
         "totals": {"movies": len(movies), "shows": len(shows)},
@@ -241,6 +236,15 @@ async def recombee_diagnose(
       - "no_credentials"   missing DB ID or token
     """
     _require_admin(x_admin_token)
+    if get_settings().recommender != "recombee":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "RECOMMENDER=local — Recombee is not in use. "
+                "Use GET /admin/selftest for engine diagnostics."
+            ),
+        )
+    from app.services.recombee import get_recombee
     recombee = get_recombee()
     config = recombee.config_dump()
 
@@ -453,6 +457,25 @@ async def admin_similar(
     return {"seed_id": seed_id, "k": k, "media_type": media_type, "results": titled}
 
 
+@router.get("/eval")
+async def admin_eval(
+    k: int = 50,
+    holdout: int = 5,
+    x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
+) -> dict[str, Any]:
+    """Offline leave-last-N-out backtest of the recommendation engine.
+
+    For every user with enough embedded history: hide their most recent
+    `holdout` watches, rebuild the profile from the rest, and check
+    whether the hidden items land in the top-`k` recommendations.
+    Returns hit_rate + mean_recall plus per-user detail. Run it before
+    and after any ranking change to see whether the change helped.
+    """
+    _require_admin(x_admin_token)
+    from app.services.evaluator import evaluate
+    return await evaluate(k=k, holdout=holdout)
+
+
 @router.get("/health/history")
 async def admin_health_history(
     x_admin_token: str | None = Header(default=None, alias="X-Admin-Token"),
@@ -492,9 +515,9 @@ async def admin_selftest(
     """Comprehensive end-to-end probe of every system + subsystem.
 
     Tests, in parallel:
-      external — database, Trakt, TMDB, Recombee, LLM, embeddings
-      internal — similarity service, watch-state state machine,
-                 feed builder, scheduler
+      external — database, Trakt, TMDB, LLM, embeddings
+      internal — recommendation engine, similarity service,
+                 watch-state state machine, feed builder, scheduler
       config   — required env vars + base_url scheme
       data     — table counts + cross-table consistency
 

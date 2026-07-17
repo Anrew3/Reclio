@@ -8,7 +8,6 @@ services:
     env_file: .env
     volumes:
       - ./data/db:/app/data/db
-      - ./data/chroma:/app/data/chroma
     ports:
       - "8000:8000"
     depends_on:

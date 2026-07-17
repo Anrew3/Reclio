@@ -416,41 +416,6 @@ class LLMService:
     async def close(self) -> None:
         await self.provider.close()
 
-    async def generate_byw_title(self, watched_title: str, media_type: str) -> str:
-        """'Because You Watched'-style Netflix section title.
-
-        Always returns a usable string — falls back to a plain f-string
-        if the provider is unreachable or returns garbage.
-        """
-        safe_title = sanitize_for_prompt(watched_title, max_len=80)
-        safe_type = sanitize_for_prompt(media_type, max_len=20)
-        fallback = f"Because You Watched {safe_title}" if safe_title else "Because You Watched"
-        if not safe_title or not self.enabled:
-            return fallback
-
-        key = f"byw:{self.name}:{safe_type}:{safe_title}"
-        cached = self._cache.get(key)
-        if cached:
-            return cached
-
-        prompt = (
-            "You write short, catchy Netflix-style section titles.\n"
-            f"The viewer just finished the {safe_type} '{safe_title}'.\n"
-            "Write ONE short section title (max 8 words) suggesting more of the "
-            "same vibe. Examples: 'Because You Watched Inception', "
-            "'Since You Loved Breaking Bad', 'More Like Ozark'.\n"
-            "Respond with ONLY the title text, no quotes, no explanation."
-        )
-        result = await self.provider.generate(prompt, max_tokens=24)
-        if not result:
-            return fallback
-
-        cleaned = result.split("\n", 1)[0].strip().strip('"').strip("'").strip()
-        if len(cleaned) < 6 or len(cleaned) > 80:
-            cleaned = fallback
-        self._cache.set(key, cleaned)
-        return cleaned
-
     async def generate_personality_summary(
         self,
         *,
@@ -707,6 +672,134 @@ class LLMService:
             "answer": answer or None,
             "mutations": mutations,
             "dislike": dislike,
+        }
+
+    async def parse_recommendation_feedback(
+        self,
+        comment: str,
+        *,
+        title: str,
+        media_type: str,
+        genres: list[str] | None = None,
+        movie_genres: dict[int, str] | None = None,
+        tv_genres: dict[int, str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Turn a free-text comment about a recommended title into
+        structured engine signal.
+
+        The viewer writes things like "loved the slow-burn tension but
+        the ending fell flat" or "not for me — too gory". We extract:
+
+            {
+              "sentiment": float -1.0..1.0,   # overall stance on the title
+              "reply": str,                    # short warm ack for the UI
+              "liked": [str], "disliked": [str],   # aspect phrases
+              "block": bool,                   # explicit "never again"
+              "boost_keywords": [str],
+              "exclude_keywords": [str],
+              "exclude_movie_genres": [int],
+              "exclude_show_genres": [int]
+            }
+
+        None on provider failure/disabled — caller falls back to a
+        lexicon heuristic so feedback always lands.
+        """
+        if not self.enabled:
+            return None
+        safe_c = sanitize_for_prompt(comment, max_len=500)
+        if not safe_c:
+            return None
+        safe_title = sanitize_for_prompt(title or "", 120)
+        genre_ctx = ", ".join((genres or [])[:6]) or "(unknown)"
+        movie_ids = ",".join(str(i) for i in (movie_genres or {}).keys())
+        tv_ids = ",".join(str(i) for i in (tv_genres or {}).keys())
+
+        prompt = (
+            "You are Reclio's taste-learning backend. A viewer commented on a\n"
+            f"recommended {media_type} titled '{safe_title}' (genres: {genre_ctx}).\n"
+            "Extract their taste signal. Respond with ONE JSON object — no prose,\n"
+            "no markdown fence — matching:\n"
+            "{\n"
+            '  "sentiment": number -1.0..1.0,   // their overall stance on THIS title\n'
+            '  "reply": "string, max 200 chars, warm ack that names what you learned",\n'
+            '  "liked": ["short aspect phrases they liked"],\n'
+            '  "disliked": ["short aspect phrases they disliked"],\n'
+            '  "block": true|false,             // ONLY if they clearly never want it shown again\n'
+            '  "boost_keywords": ["1-3 word themes to see MORE of"],\n'
+            '  "exclude_keywords": ["1-3 word themes to see LESS of"],\n'
+            '  "exclude_movie_genres": [int from: ' + movie_ids + '],\n'
+            '  "exclude_show_genres": [int from: ' + tv_ids + ']\n'
+            "}\n\n"
+            "Rules:\n"
+            "- sentiment reflects the title overall: 'loved it' ≈ 0.9,\n"
+            "  'looks interesting' ≈ 0.4, 'meh' ≈ 0, 'not for me' ≈ -0.5,\n"
+            "  'hated it / never show me this' ≈ -0.9.\n"
+            "- Mixed comments get a mixed sentiment AND both liked+disliked lists.\n"
+            "- Only set genre exclusions for category-level statements\n"
+            "  ('I don't do horror'), never for title-specific gripes.\n"
+            "- Keywords are for themes/tones ('slow burn', 'time travel',\n"
+            "  'gore'), not proper nouns.\n"
+            "- Include only keys you actually have signal for (sentiment and\n"
+            "  reply are always required).\n\n"
+            f"Viewer comment: {safe_c}\n\n"
+            "JSON:"
+        )
+
+        result = await self.provider.generate(prompt, max_tokens=400, temperature=0.3)
+        if not result:
+            return None
+
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].lstrip()
+            cleaned = cleaned.split("```", 1)[0].strip()
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            import json
+            parsed = json.loads(cleaned[start:end + 1])
+        except (ValueError, TypeError):
+            return None
+
+        try:
+            sentiment = max(-1.0, min(1.0, float(parsed.get("sentiment"))))
+        except (TypeError, ValueError):
+            return None
+
+        def _phrases(values: Any, cap: int = 4) -> list[str]:
+            out: list[str] = []
+            for v in (values or []):
+                if isinstance(v, str):
+                    s = v.strip().lower()[:60]
+                    if s:
+                        out.append(s)
+                if len(out) >= cap:
+                    break
+            return out
+
+        mvg = set((movie_genres or {}).keys())
+        tvg = set((tv_genres or {}).keys())
+        return {
+            "source": "llm",
+            "sentiment": sentiment,
+            "reply": str(parsed.get("reply") or "").strip()[:240] or None,
+            "liked": _phrases(parsed.get("liked")),
+            "disliked": _phrases(parsed.get("disliked")),
+            "block": bool(parsed.get("block")),
+            "boost_keywords": _phrases(parsed.get("boost_keywords")),
+            "exclude_keywords": _phrases(parsed.get("exclude_keywords")),
+            "exclude_movie_genres": [
+                int(g) for g in (parsed.get("exclude_movie_genres") or [])
+                if isinstance(g, (int, float)) and int(g) in mvg
+            ],
+            "exclude_show_genres": [
+                int(g) for g in (parsed.get("exclude_show_genres") or [])
+                if isinstance(g, (int, float)) and int(g) in tvg
+            ],
         }
 
     async def derive_preferences(

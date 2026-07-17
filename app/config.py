@@ -18,7 +18,15 @@ class Settings(BaseSettings):
     # TMDB
     tmdb_api_key: str = ""
 
-    # Recombee
+    # -------- Recommendation engine --------
+    # "local" (default) — fully self-hosted: interactions in SQLite,
+    # recommendations from embedding-based taste profiles. No external
+    # recommendation API, no extra keys.
+    # "recombee" (legacy) — proxy to the Recombee SaaS as pre-1.7 versions
+    # did. Requires the recombee-api-client package + the RECOMBEE_* vars.
+    recommender: Literal["local", "recombee"] = "local"
+
+    # Recombee (only used when recommender="recombee")
     recombee_database_id: str = ""
     recombee_private_token: str = ""
     recombee_region: str = "us-west"  # us-west | eu-west | ap-se
@@ -92,7 +100,6 @@ class Settings(BaseSettings):
 
     # Storage
     database_url: str = "sqlite+aiosqlite:///./data/db/reclio.db"
-    chroma_persist_dir: str = "./data/chroma"
 
     @property
     def trakt_redirect_uri(self) -> str:

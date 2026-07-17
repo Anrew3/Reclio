@@ -260,14 +260,6 @@ async def auth_callback(
             "Reclio • Recommended Shows",
             "Auto-updated by Reclio with shows you'll love.",
         )
-        user.trakt_byw_movies_list_id = await _safe_create(
-            "Reclio • Because You Watched (Movies)",
-            "Movies similar to what you've recently watched.",
-        )
-        user.trakt_byw_shows_list_id = await _safe_create(
-            "Reclio • Because You Watched (Shows)",
-            "Shows similar to what you've recently watched.",
-        )
         user.trakt_watchprogress_list_id = await _safe_create(
             "Reclio • Watch Progress",
             "Mirrors your Trakt playback progress for Chillio.",
@@ -282,31 +274,9 @@ async def auth_callback(
                     break
         except Exception:  # noqa: BLE001
             pass
-    else:
-        # Returning user — backfill BYW lists if the columns are still null
-        # (pre-1.2 install). Idempotent: each create is skipped if the id
-        # already exists.
-        async def _backfill(field: str, name: str, desc: str) -> None:
-            if getattr(user, field, None):
-                return
-            try:
-                lst = await trakt.create_list(access_token, name, desc)
-                lid = ((lst or {}).get("ids") or {}).get("trakt")
-                if lid:
-                    setattr(user, field, lid)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("Backfill %s failed: %s", field, exc)
-
-        await _backfill(
-            "trakt_byw_movies_list_id",
-            "Reclio • Because You Watched (Movies)",
-            "Movies similar to what you've recently watched.",
-        )
-        await _backfill(
-            "trakt_byw_shows_list_id",
-            "Reclio • Because You Watched (Shows)",
-            "Shows similar to what you've recently watched.",
-        )
+    # (Since v1.8, only the two "Recommended" lists are managed — the
+    # Because You Watched lists were retired with the feed simplification.
+    # Existing BYW list-id columns stay in the DB but are no longer used.)
 
     await session.commit()
 
@@ -511,9 +481,13 @@ def _personality_breakdown(
     The taste-cache stores per-media scores already normalized to [0, 1].
     For the dashboard's "personality wheel" we treat both media types
     as one bag (a viewer who loves Sci-Fi movies AND Sci-Fi shows is
-    *very* into sci-fi). Returns top-N genres with pct + a precomputed
-    SVG-stroke offset used by the donut chart (math done server-side
+    *very* into sci-fi). Returns top-N genres with pct + precomputed
+    SVG-stroke geometry used by the donut chart (math done server-side
     so the template stays declarative).
+
+    Each slice's drawn arc is trimmed by a small fixed gap so adjacent
+    slices read as separate segments (the iOS Health look); offsets
+    still advance by the full arc so percentages stay truthful.
     """
     bag: dict[str, float] = {}
     for scores, table in ((movie_scores or {}, MOVIE_GENRES),
@@ -537,6 +511,9 @@ def _personality_breakdown(
     # Donut geometry: radius 42 → circumference ~263.9. The donut SVG
     # uses stroke-dasharray "len gap" + stroke-dashoffset to draw arcs.
     circumference = 2 * 3.141592653589793 * 42
+    # Visual breathing room between segments. Only applied when there's
+    # more than one slice — a single 100% slice should be a full ring.
+    slice_gap = 2.4 if len(top) > 1 else 0.0
     for i, (name, score) in enumerate(top):
         if i == len(top) - 1:
             pct = 100 - running_pct
@@ -544,13 +521,14 @@ def _personality_breakdown(
             pct = max(1, int(round(score / total * 100)))
             running_pct += pct
         arc_len = circumference * (pct / 100.0)
+        drawn_len = max(0.8, arc_len - slice_gap)
         out.append({
             "name": name,
             "pct": pct,
             "color": _DONUT_COLORS[i % len(_DONUT_COLORS)],
-            "arc_len": round(arc_len, 2),
-            "gap_len": round(circumference - arc_len, 2),
-            "offset": round(cumulative_offset, 2),
+            "arc_len": round(drawn_len, 2),
+            "gap_len": round(circumference - drawn_len, 2),
+            "offset": round(cumulative_offset - slice_gap / 2.0, 2),
         })
         cumulative_offset -= arc_len  # next slice starts where this one ends
     return out

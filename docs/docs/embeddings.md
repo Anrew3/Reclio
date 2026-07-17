@@ -45,16 +45,16 @@ Three rails depend on embeddings:
 
 | Row | How embeddings help |
 |---|---|
-| **Because You Watched** | 60/40 blend of Recombee item-to-item + vector neighbors. Recombee leads (collective behavior signal), embeddings fill in semantic neighbors Recombee's co-watch graph hasn't picked up yet. |
-| **Recommended For You** (cold-start) | When Recombee returns &lt; 5 items (new user), seed the row from vector neighbors of the user's highest-rated film. |
+| **Because You Watched** | Semantic neighbors of your last-finished title (in `recombee` legacy mode, blended with Recombee item-to-item). |
+| **Recommended For You** | The local engine scores the whole catalog against your taste-profile vector — a recency-weighted mean of watched-item embeddings. Cold start seeds from your last watched title. |
 | `/admin/similar/<id>` | Direct sanity check — given a TMDB ID, what does the embedding model think is closest? Useful for verifying the catalog is healthy. |
 
-## Why we have *both* Recombee and embeddings
+## Content-based vs collaborative signal
 
 They answer **fundamentally different questions** — see
-[Recombee](./recombee) for the deep dive — but the short version:
+[Recommendation engine](./recombee) for the deep dive — but the short version:
 
-- **Recombee** answers *"what does **this user** want next?"* (collaborative
+- **Collaborative filtering** answers *"what does **this user** want next?"* (collaborative
   filtering — learns from collective behavior).
 - **Embeddings** answer *"what is similar to **this film**?"* (content-based
   — looks only at the film, ignores the user).
@@ -201,7 +201,7 @@ movie-recommendation use, and you're paying ~6× more. Stick with
 The next dramatic improvement to recommendation quality won't come
 from a bigger embedding model — it'll come from using the LLM as a
 reranker at the very end of the pipeline. Take the top-30 candidates
-from each row (Recombee + vector blend), then ask the LLM "given this
+from each row (engine + vector blend), then ask the LLM "given this
 viewer's recent watches and personality, rank these 30 from most to
 least likely to satisfy them." This is what frontier production
 systems (Netflix, Spotify) do.

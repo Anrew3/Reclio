@@ -3,10 +3,11 @@ internal subsystem and reports pass/fail with structured detail.
 
 Designed as a single-call diagnostic. The hourly health check probes
 the bare minimum needed to detect outages. This module probes
-*everything*: database round-trip, Trakt + TMDB + Recombee + LLM
-+ embeddings + similarity + watch-state state machine + feed builder
-+ taste profile + scheduler + sync jobs + admin auth + chat intent
-classification + dislike resolution + personality blurb generation.
+*everything*: database round-trip, Trakt + TMDB + recommendation
+engine + LLM + embeddings + similarity + watch-state state machine
++ feed builder + taste profile + scheduler + sync jobs + admin auth
++ chat intent classification + dislike resolution + personality blurb
+generation.
 
 Output is a JSON-serializable dict so /admin/selftest can stream it
 back to the operator. Every check returns a uniform shape so the UI
@@ -39,6 +40,7 @@ from sqlalchemy import func, select, text
 from app.config import get_settings
 from app.database import session_scope
 from app.models.content import ContentCatalog
+from app.models.interaction import Interaction
 from app.models.preferences import UserPreferences
 from app.models.taste_cache import TasteCache
 from app.models.user import User
@@ -148,27 +150,63 @@ async def _t_tmdb() -> ProbeResult:
         )
 
 
-async def _t_recombee() -> ProbeResult:
+async def _t_engine() -> ProbeResult:
+    """Recommendation engine — local store round-trip, or the legacy
+    Recombee reachability battery when RECOMMENDER=recombee."""
     t0 = time.monotonic()
+    settings = get_settings()
+
+    if settings.recommender != "recombee":
+        try:
+            from app.services.recommender import engine_status, recommend_for_user
+            status = await engine_status()
+            if status.get("error"):
+                return ProbeResult(
+                    "engine", "internal", "fail", _ms_since(t0),
+                    detail=status, error=status["error"],
+                    remediation="interactions table unreadable — check DB migrations.",
+                )
+            # Exercise the full read path with a synthetic user: no
+            # interactions → popularity fallback. Proves the ranking
+            # SQL + exclusion logic runs end to end.
+            sample = await recommend_for_user("selftest_probe_user", count=5)
+            embedded = status.get("catalog_embedded") or 0
+            warn = embedded == 0
+            return ProbeResult(
+                "engine", "internal",
+                "warn" if warn else "pass",
+                _ms_since(t0),
+                detail={**status, "sample_recs": sample[:5]},
+                error=("no embedded catalog items — profile-vector recs "
+                       "inactive, popularity fallback only") if warn else None,
+                remediation=("Run POST /admin/sync/content and verify the "
+                             "embeddings probe passes.") if warn else None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return ProbeResult(
+                "engine", "internal", "fail", _ms_since(t0),
+                error=str(exc)[:200],
+            )
+
     from app.services.recombee import get_recombee
     recombee = get_recombee()
     cfg = recombee.config_dump()
 
     if not cfg["sdk_loaded"]:
         return ProbeResult(
-            "recombee", "external", "fail", _ms_since(t0),
+            "engine", "external", "fail", _ms_since(t0),
             detail=cfg, error="Recombee SDK not installed",
             remediation="Rebuild the container (recombee-api-client missing).",
         )
     if not cfg["token_present"] or not cfg["database_id"]:
         return ProbeResult(
-            "recombee", "external", "fail", _ms_since(t0),
+            "engine", "external", "fail", _ms_since(t0),
             detail=cfg, error="missing RECOMBEE_DATABASE_ID or RECOMBEE_PRIVATE_TOKEN",
             remediation="Set both env vars from admin.recombee.com.",
         )
     if not cfg["available"]:
         return ProbeResult(
-            "recombee", "external", "fail", _ms_since(t0),
+            "engine", "external", "fail", _ms_since(t0),
             detail=cfg, error="client failed to initialize despite credentials present",
         )
 
@@ -176,7 +214,7 @@ async def _t_recombee() -> ProbeResult:
     if count is None:
         write_ok, write_err = await recombee.write_test_item()
         return ProbeResult(
-            "recombee", "external", "fail", _ms_since(t0),
+            "engine", "external", "fail", _ms_since(t0),
             detail={**cfg, "write_probe": {"ok": write_ok, "error": write_err}},
             error="ListItems unreachable",
             remediation=("Most likely wrong RECOMBEE_DATABASE_ID, wrong token type "
@@ -194,7 +232,7 @@ async def _t_recombee() -> ProbeResult:
 
     if catalog_synced > 5 and count == 0:
         return ProbeResult(
-            "recombee", "external", "fail", _ms_since(t0),
+            "engine", "external", "fail", _ms_since(t0),
             detail={
                 **cfg, "verdict": "wrong_region",
                 "reclio_marked_synced": catalog_synced,
@@ -207,7 +245,7 @@ async def _t_recombee() -> ProbeResult:
 
     schema_ok = recombee._properties_initialized  # noqa: SLF001
     return ProbeResult(
-        "recombee", "external",
+        "engine", "external",
         "pass" if schema_ok else "warn",
         _ms_since(t0),
         detail={
@@ -418,7 +456,7 @@ async def _t_watch_state_machine() -> ProbeResult:
 
 
 async def _t_feed_builder() -> ProbeResult:
-    """Build the 10-feed response against synthetic user/taste/prefs."""
+    """Build the 2-feed response against synthetic user/taste/prefs."""
     t0 = time.monotonic()
     try:
         from app.services.feed_builder import build_feeds
@@ -426,8 +464,6 @@ async def _t_feed_builder() -> ProbeResult:
         class _U:
             trakt_rec_movies_list_id = 111
             trakt_rec_shows_list_id = 222
-            trakt_byw_movies_list_id = 333
-            trakt_byw_shows_list_id = 444
             trakt_watchprogress_list_id = None
             trakt_watchlist_id = None
 
@@ -456,13 +492,13 @@ async def _t_feed_builder() -> ProbeResult:
             favorite_moods: list[str] = []
 
         feeds = await build_feeds(None, _U(), _T(), prefs=_P())
-        # Should be exactly 10 (5 movie + 5 show)
+        # v1.8 layout: exactly 2 feeds (Recommended Movies + Shows)
         movie_count = sum(1 for f in feeds if f.get("content_type") == "movies")
         show_count = sum(1 for f in feeds if f.get("content_type") == "shows")
         ok = (
-            len(feeds) == 10
-            and movie_count == 5
-            and show_count == 5
+            len(feeds) == 2
+            and movie_count == 1
+            and show_count == 1
             and all(f.get("source") in ("trakt_list", "tmdb_query") for f in feeds)
         )
         return ProbeResult(
@@ -531,11 +567,12 @@ async def _t_config() -> ProbeResult:
         "TRAKT_CLIENT_ID": bool(settings.trakt_client_id),
         "TRAKT_CLIENT_SECRET": bool(settings.trakt_client_secret),
         "TMDB_API_KEY": bool(settings.tmdb_api_key),
-        "RECOMBEE_DATABASE_ID": bool(settings.recombee_database_id),
-        "RECOMBEE_PRIVATE_TOKEN": bool(settings.recombee_private_token),
         "FERNET_KEY": bool(settings.fernet_key),
         "SECRET_KEY": settings.secret_key != "change-me-in-production",
     }
+    if settings.recommender == "recombee":
+        fields["RECOMBEE_DATABASE_ID"] = bool(settings.recombee_database_id)
+        fields["RECOMBEE_PRIVATE_TOKEN"] = bool(settings.recombee_private_token)
     for k, ok in fields.items():
         if not ok:
             issues.append(k)
@@ -575,10 +612,7 @@ async def _t_data() -> ProbeResult:
                     select(func.count()).select_from(ContentCatalog)
                     .where(ContentCatalog.embedding.is_not(None))
                 ),
-                "catalog_recombee_synced": await session.scalar(
-                    select(func.count()).select_from(ContentCatalog)
-                    .where(ContentCatalog.recombee_synced.is_(True))
-                ),
+                "interactions":       await session.scalar(select(func.count()).select_from(Interaction)),
                 "watch_attempts":     await session.scalar(select(func.count()).select_from(WatchAttempt)),
             }
         # Status: warn if connected users have no taste cache (sync hasn't run)
@@ -612,7 +646,7 @@ async def run_selftest() -> dict[str, Any]:
         _t_database(),
         _t_trakt(),
         _t_tmdb(),
-        _t_recombee(),
+        _t_engine(),
         _t_llm(),
         _t_embeddings(),
         _t_similarity(),

@@ -1,5 +1,6 @@
-"""Per-user sync: build taste profile, push interactions to Recombee,
-write recommendations back to managed Trakt lists.
+"""Per-user sync: build taste profile, record interactions in the local
+engine (mirrored to Recombee in legacy mode), write recommendations back
+to managed Trakt lists.
 """
 
 from __future__ import annotations
@@ -12,12 +13,13 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.database import session_scope
 from app.models.content import ContentCatalog
 from app.models.taste_cache import TasteCache
 from app.models.user import User
+from app.services import recommender, similarity
 from app.services.activity import _flatten_activities
-from app.services.recombee import get_recombee
 from app.services.taste_profile import build_taste_profile
 from app.services.tmdb import get_tmdb
 from app.services.trakt import get_trakt
@@ -26,7 +28,7 @@ from app.utils.crypto import decrypt
 logger = logging.getLogger(__name__)
 
 # Per-user sync locks. Prevents overlapping syncs (e.g. rapid manual refresh
-# clicks) from racing on the same user's TasteCache / Recombee state.
+# clicks) from racing on the same user's TasteCache / engine state.
 _user_sync_locks: dict[str, asyncio.Lock] = {}
 _user_sync_locks_guard = asyncio.Lock()
 
@@ -41,7 +43,7 @@ async def _get_user_sync_lock(user_id: str) -> asyncio.Lock:
 
 
 def _normalize_trakt_rating(rating: int | float) -> float:
-    """Trakt 1–10 → Recombee rating in [-1.0, 1.0]."""
+    """Trakt 1–10 → engine rating in [-1.0, 1.0]."""
     try:
         r = float(rating)
     except (TypeError, ValueError):
@@ -58,30 +60,27 @@ def _parse_trakt_ts(iso_str: str | None) -> datetime | None:
         return None
 
 
-async def _enrich_recombee_for_history(
+async def _enrich_catalog_for_history(
     item_ids: set[str],
 ) -> int:
-    """Ensure every Trakt-derived item in `item_ids` exists in Recombee
-    *with full properties* (title, overview, genres, year, vote_average,
-    cast, director, media_type, popularity).
+    """Ensure every Trakt-derived item in `item_ids` exists in the local
+    content catalog *with full properties and an embedding*.
 
-    Why: Recombee's interaction calls (AddDetailView/AddRating/AddBookmark)
-    accept `cascade_create=True` which auto-creates the item if missing,
-    but ONLY with the bare ID — no properties at all. The Recombee
-    dashboard then shows an item like `movie_27205` with empty columns.
-    By calling SetItemValues *first* with full TMDB metadata, the
-    dashboard surfaces titles/genres/etc and the item-to-item
-    recommendations work much better (they need actual properties).
+    Why: the local engine builds a user's taste-profile vector from the
+    embeddings of items they've interacted with. Items that only ever
+    appeared in a user's history (never in TMDB's popular/trending
+    sweeps) would otherwise have no catalog row and contribute nothing
+    to the profile. This backfills them — metadata for the taste math,
+    embedding for the vector math.
 
-    Idempotent + cheap: skips items already present in our local
-    ContentCatalog (those went through content_sync and have full
-    properties already in Recombee). Only fetches TMDB metadata for
-    items we've never seen.
+    In recombee mode the same properties are also mirrored to Recombee
+    (its item-to-item recommendations need real properties; interactions
+    with cascade_create only make bare-ID shells).
 
-    Returns the number of items that got enriched in this pass.
+    Idempotent + cheap: skips items already present in ContentCatalog.
+    Returns the number of items enriched in this pass.
     """
-    recombee = get_recombee()
-    if not recombee.available or not item_ids:
+    if not item_ids:
         return 0
 
     # Skip items we've already cataloged — content_sync handles those.
@@ -95,7 +94,7 @@ async def _enrich_recombee_for_history(
         return 0
 
     logger.info(
-        "user_sync: enriching %d new Recombee items with TMDB metadata "
+        "user_sync: enriching %d history items with TMDB metadata "
         "(%d already in catalog)",
         len(missing), len(already_cataloged),
     )
@@ -154,6 +153,7 @@ async def _enrich_recombee_for_history(
                 "media_type": media_type,
                 "cast": [c.get("name") for c in cast if c.get("name")],
                 "director": director,
+                "poster_path": full.get("poster_path"),
             }
             return item_id, props
 
@@ -162,18 +162,50 @@ async def _enrich_recombee_for_history(
     if not upsert_pairs:
         return 0
 
-    # Reuse the same batch upsert path content_sync uses — already
-    # handles per-item failure tracking + cascade_create.
-    push_stats = await recombee.upsert_items_batch(upsert_pairs)
-    failed = push_stats.get("failed_ids") or set()
+    # Embed each item so it can participate in profile-vector math.
+    # Best-effort: a failed embed still gets a catalog row (metadata is
+    # useful on its own) and content_sync's next pass can retry.
+    from app.services.embeddings import build_embedding_text, embed_texts
+    texts = [
+        build_embedding_text(
+            props["title"],
+            props["overview"],
+            [{"name": n} for n in (props["genres"] or [])],
+            [{"name": n} for n in (props["cast"] or [])],
+            None,
+        )
+        for _item_id, props in upsert_pairs
+    ]
+    embeddings: list[list[float]] = []
+    try:
+        embeddings = await embed_texts(texts)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("user_sync: history embedding failed: %s", exc)
+    if len(embeddings) != len(upsert_pairs):
+        embeddings = [[] for _ in upsert_pairs]
 
-    # Persist as catalog rows too, so subsequent syncs skip the TMDB fetch.
+    # Legacy mirror: recombee mode also pushes full item properties.
+    # poster_path is local-only — it isn't in the Recombee schema.
+    failed: set[str] = set()
+    mirrored = False
+    if get_settings().recommender == "recombee":
+        from app.services.recombee import get_recombee
+        recombee = get_recombee()
+        if recombee.available:
+            recombee_pairs = [
+                (item_id, {k: v for k, v in props.items() if k != "poster_path"})
+                for item_id, props in upsert_pairs
+            ]
+            push_stats = await recombee.upsert_items_batch(recombee_pairs)
+            failed = push_stats.get("failed_ids") or set()
+            mirrored = True
+
+    # Persist as catalog rows so subsequent syncs skip the TMDB fetch.
+    from app.jobs.content_sync import _embedding_source_hash, _pack_embedding
     rows: list[ContentCatalog] = []
     now = datetime.utcnow()
-    for item_id, props in upsert_pairs:
-        if item_id in failed:
-            continue
-        rows.append(ContentCatalog(
+    for (item_id, props), text, vec in zip(upsert_pairs, texts, embeddings):
+        row = ContentCatalog(
             tmdb_id=item_id,
             media_type=props["media_type"],
             title=props["title"],
@@ -184,18 +216,28 @@ async def _enrich_recombee_for_history(
             year=props["year"],
             vote_average=props["vote_average"],
             popularity=props["popularity"],
-            embedding_stored=False,
-            recombee_synced=True,
+            poster_path=props.get("poster_path"),
+            embedding_stored=bool(vec),
+            recombee_synced=mirrored and item_id not in failed,
             last_updated=now,
-        ))
+        )
+        if vec:
+            from app.services.embeddings import get_embeddings_provider
+            row.embedding = _pack_embedding(vec)
+            row.embedding_dim = len(vec)
+            row.embedding_model = get_embeddings_provider().name
+            row.embedding_source_hash = _embedding_source_hash(text)
+            row.embedding_at = now
+        rows.append(row)
     if rows:
         async with session_scope() as session:
             session.add_all(rows)
+        if any(r.embedding is not None for r in rows):
+            similarity.invalidate()
 
     logger.info(
-        "user_sync: enriched %d Recombee items with full properties "
-        "(%d failed during push)",
-        len(rows), len(failed),
+        "user_sync: enriched %d history items (%d embedded)",
+        len(rows), sum(1 for r in rows if r.embedding is not None),
     )
     return len(rows)
 
@@ -205,12 +247,16 @@ async def _push_interactions(
     access_token: str,
     since: datetime | None,
 ) -> datetime:
-    """Batch-push Trakt history/ratings/watchlist to Recombee. Returns new cutoff."""
-    recombee = get_recombee()
-    if not recombee.available:
-        return datetime.utcnow()
+    """Batch-record Trakt history/ratings/watchlist into the engine.
 
-    await recombee.add_user(user_id)
+    Interactions always land in the local store; in recombee mode they
+    are also mirrored to Recombee. Returns the new sync cutoff.
+    """
+    if get_settings().recommender == "recombee":
+        from app.services.recombee import get_recombee
+        recombee = get_recombee()
+        if recombee.available:
+            await recombee.add_user(user_id)
     trakt = get_trakt()
 
     # gather with return_exceptions=True never raises — it inlines exceptions.
@@ -266,7 +312,7 @@ async def _push_interactions(
                 "timestamp": ts,
             })
 
-    # --- Ratings (full push — ratings are sparse and Recombee dedupes) ---
+    # --- Ratings (full push — ratings are sparse and the store upserts) ---
     for items, kind in ((movie_ratings, "movie"), (show_ratings, "show")):
         item_key = "movie" if kind == "movie" else "show"
         id_prefix = "movie" if kind == "movie" else "tv"
@@ -307,29 +353,29 @@ async def _push_interactions(
         })
 
     if interactions:
-        # Step 1: enrich Recombee with full item properties for every
-        # distinct item the user has touched. This MUST run before
-        # pushing the interactions themselves — otherwise cascade_create
-        # makes properties-less item shells that show as bare IDs in
-        # the Recombee dashboard.
+        # Step 1: make sure every touched item has a catalog row with
+        # metadata + embedding. This MUST run before the engine reads the
+        # interactions — the profile vector can only see embedded items
+        # (and in recombee mode, interactions with cascade_create would
+        # otherwise make properties-less item shells).
         distinct_item_ids = {i["item_id"] for i in interactions}
         try:
-            await _enrich_recombee_for_history(distinct_item_ids)
+            await _enrich_catalog_for_history(distinct_item_ids)
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "user_sync: history enrichment failed for %s: %s "
-                "(interactions still get pushed)", user_id, exc,
+                "(interactions still get recorded)", user_id, exc,
             )
 
         logger.info(
-            "user_sync: pushing %d interactions (%d views, %d ratings, %d bookmarks) for %s",
+            "user_sync: recording %d interactions (%d views, %d ratings, %d bookmarks) for %s",
             len(interactions),
             sum(1 for i in interactions if i["kind"] == "view"),
             sum(1 for i in interactions if i["kind"] == "rating"),
             sum(1 for i in interactions if i["kind"] == "bookmark"),
             user_id,
         )
-        await recombee.push_interactions_batch(interactions)
+        await recommender.push_interactions(interactions)
 
     return datetime.utcnow()
 
@@ -341,7 +387,7 @@ async def _refresh_managed_list(
     recommendations: list[str],
     media_type: str,
 ) -> None:
-    """Clear and repopulate a managed Trakt list with Recombee recommendations."""
+    """Clear and repopulate a managed Trakt list with engine recommendations."""
     if not list_id or not recommendations:
         return
     trakt = get_trakt()
@@ -439,7 +485,7 @@ async def sync_one_user(user_id: str, *, force: bool = False) -> None:
             # 1.5. Watch-state machine — turns /sync/playback deltas into
             #      structured signal (completed / abandoned_sleep /
             #      abandoned_bounce / abandoned_lost_interest / accidental).
-            #      Pushes Recombee ratings + marks taste cache stale before
+            #      Records engine signals + marks taste cache stale before
             #      step 2 fetches recommendations, so verdicts land on the
             #      same tick they're decided.
             try:
@@ -468,115 +514,35 @@ async def sync_one_user(user_id: str, *, force: bool = False) -> None:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("watch_state: failed for %s: %s", user_id, exc)
 
-            # 2. Pull recommendations from Recombee — both the headline
-            #    "Recommended For You" and the BYW lists. Item-to-item
-            #    recommendations naturally exclude what the target user
-            #    has already watched, so BYW rows never repeat.
-            recombee = get_recombee()
+            # 2. Pull recommendations from the engine. The v1.8 pipeline
+            #    (taste facets → priors/serve-decay → MMR) handles cold
+            #    start and diversity internally, and both rows exclude
+            #    everything the user has watched or blocked.
             movie_recs: list[str] = []
             show_recs: list[str] = []
-            byw_movie_recs: list[str] = []
-            byw_show_recs: list[str] = []
-
-            taste = await session.get(TasteCache, user_id)
-            byw_movie_anchor = (
-                f"movie_{taste.last_watched_movie_tmdb_id}"
-                if taste and taste.last_watched_movie_tmdb_id else None
-            )
-            byw_show_anchor = (
-                f"tv_{taste.last_watched_show_tmdb_id}"
-                if taste and taste.last_watched_show_tmdb_id else None
-            )
-
-            if recombee.available:
-                try:
-                    coros = [
-                        recombee.get_recommendations(user_id, count=50, filter_media_type="movie"),
-                        recombee.get_recommendations(user_id, count=50, filter_media_type="tv"),
-                        (
-                            recombee.recommend_items_to_item(
-                                byw_movie_anchor, user_id, count=25, filter_media_type="movie",
-                            )
-                            if byw_movie_anchor else asyncio.sleep(0, result=[])
-                        ),
-                        (
-                            recombee.recommend_items_to_item(
-                                byw_show_anchor, user_id, count=25, filter_media_type="tv",
-                            )
-                            if byw_show_anchor else asyncio.sleep(0, result=[])
-                        ),
-                    ]
-                    movie_recs, show_recs, byw_movie_recs, byw_show_recs = await asyncio.gather(*coros)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("user_sync: recombee recs failed for %s: %s", user_id, exc)
-
-            # 2.5. Vector-similarity layer — blend semantic neighbors into
-            #      BYW lists and seed cold-start "Recommended" rows when
-            #      Recombee returned nothing useful (< 12 history items).
             try:
-                from app.services.similarity import similar_to
-                # Build a watched set so we never recommend something they
-                # already saw via the vector path. (Recombee already does
-                # this server-side for its own results.)
-                watched: set[str] = set()
-                # Cheap reuse: anchor history that's already cached.
-                for h in (history_recent or []):
-                    if h.get("type") == "movie":
-                        m = h.get("movie") or {}
-                        tmdb = (m.get("ids") or {}).get("tmdb")
-                        if tmdb:
-                            watched.add(f"movie_{tmdb}")
-                    elif h.get("type") == "episode":
-                        s = h.get("show") or {}
-                        tmdb = (s.get("ids") or {}).get("tmdb")
-                        if tmdb:
-                            watched.add(f"tv_{tmdb}")
-
-                async def _blend(recs: list[str], anchor: str | None, mt: str) -> list[str]:
-                    if not anchor:
-                        return recs
-                    sim = await similar_to(anchor, k=25, exclude=watched, media_type=mt)
-                    if not sim:
-                        return recs
-                    if not recs:
-                        # Cold-start path: pure vector seed.
-                        return sim
-                    # Blended rank: Recombee items keep their order, then
-                    # vector items fill the tail with dedupe.
-                    seen = set(recs)
-                    blended = list(recs)
-                    for s in sim:
-                        if s not in seen:
-                            blended.append(s)
-                            seen.add(s)
-                    return blended[:50]
-
-                byw_movie_recs = await _blend(byw_movie_recs, byw_movie_anchor, "movie")
-                byw_show_recs = await _blend(byw_show_recs, byw_show_anchor, "tv")
-
-                # Cold-start "Recommended For You": if Recombee gave us
-                # very little, seed from the user's last-watched anchor
-                # via vector similarity. Skip when Recombee had real recs.
-                if len(movie_recs) < 5 and byw_movie_anchor:
-                    seed = await similar_to(byw_movie_anchor, k=30, exclude=watched, media_type="movie")
-                    if seed:
-                        movie_recs = (movie_recs or []) + [s for s in seed if s not in movie_recs]
-                        movie_recs = movie_recs[:50]
-                if len(show_recs) < 5 and byw_show_anchor:
-                    seed = await similar_to(byw_show_anchor, k=30, exclude=watched, media_type="tv")
-                    if seed:
-                        show_recs = (show_recs or []) + [s for s in seed if s not in show_recs]
-                        show_recs = show_recs[:50]
+                movie_recs, show_recs = await asyncio.gather(
+                    recommender.get_recommendations(user_id, count=50, media_type="movie"),
+                    recommender.get_recommendations(user_id, count=50, media_type="tv"),
+                )
             except Exception as exc:  # noqa: BLE001
-                logger.debug("user_sync: similarity blend skipped for %s: %s", user_id, exc)
+                logger.warning("user_sync: engine recs failed for %s: %s", user_id, exc)
 
-            # 3. Push recs to Trakt managed lists
+            # 2.5. Log what we're about to serve — feeds the
+            #      served-but-ignored decay and the eval harness.
+            try:
+                await recommender.log_served(
+                    user_id,
+                    [(i, "movie") for i in movie_recs] + [(i, "tv") for i in show_recs],
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("user_sync: serve log skipped for %s: %s", user_id, exc)
+
+            # 3. Push recs to the two managed Trakt lists
             try:
                 await asyncio.gather(
                     _refresh_managed_list(user, token, user.trakt_rec_movies_list_id, movie_recs, "movies"),
                     _refresh_managed_list(user, token, user.trakt_rec_shows_list_id, show_recs, "shows"),
-                    _refresh_managed_list(user, token, user.trakt_byw_movies_list_id, byw_movie_recs, "movies"),
-                    _refresh_managed_list(user, token, user.trakt_byw_shows_list_id, byw_show_recs, "shows"),
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("user_sync: list refresh failed for %s: %s", user_id, exc)

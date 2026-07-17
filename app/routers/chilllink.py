@@ -34,7 +34,6 @@ from app.models.taste_cache import TasteCache
 from app.models.user import User
 from app.schemas.chilllink import Manifest, SupportedEndpoints
 from app.services.feed_builder import build_feeds
-from app.services.llm import get_llm
 
 logger = logging.getLogger(__name__)
 
@@ -98,13 +97,12 @@ async def feeds(
     ),
     session: AsyncSession = Depends(get_session),
 ) -> Response:
-    """Return the 10-feed personalized response. Always succeeds."""
+    """Return the 2-feed personalized response. Always succeeds."""
     import json
 
     user: User | None = None
     taste: TasteCache | None = None
     prefs: UserPreferences | None = None
-    byw_titles: dict[str, str] = {}
 
     try:
         # 1. Resolve user: by ID first, then by username as fallback.
@@ -137,7 +135,8 @@ async def feeds(
 
         # 2. Apply the optional live-context hint. Lets Chillio tell us
         #    "the user just finished Interstellar" without waiting for
-        #    the next Trakt sync to land.
+        #    the next Trakt sync to land. Feeds into the taste cache
+        #    the engine reads on its next tick.
         live_hint = _parse_last_watched(last_watched)
         if live_hint:
             kind, tmdb_id = live_hint
@@ -148,26 +147,11 @@ async def feeds(
                     taste.last_watched_movie_tmdb_id = tmdb_id
                 else:
                     taste.last_watched_show_tmdb_id = tmdb_id
-
-        # 3. Pre-generate BYW titles via the configured LLM (or fall back).
-        if taste is not None:
-            try:
-                llm = get_llm()
-                if taste.last_watched_movie_title:
-                    byw_titles["movie"] = await llm.generate_byw_title(
-                        taste.last_watched_movie_title, "movie"
-                    )
-                if taste.last_watched_show_title:
-                    byw_titles["show"] = await llm.generate_byw_title(
-                        taste.last_watched_show_title, "show"
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("LLM BYW title generation skipped: %s", exc)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Failed loading user context for feeds: %s", exc)
 
     try:
-        feed_list = await build_feeds(session, user, taste, byw_titles, prefs=prefs)
+        feed_list = await build_feeds(session, user, taste, prefs=prefs)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Feed builder failed, returning minimal fallback: %s", exc)
         feed_list = _minimal_fallback_feeds()
@@ -182,38 +166,17 @@ def _minimal_fallback_feeds() -> list[dict]:
     """Absolute last-resort feeds if the builder itself errors."""
     return [
         {
-            "id": "trending_movies",
-            "title": "Trending Movies",
+            "id": "recommended_movies",
+            "title": "Recommended Movies",
             "source": "tmdb_query",
             "source_metadata": {"path": "/trending/movie/week", "parameters": ""},
             "content_type": "movies",
         },
         {
-            "id": "trending_shows",
-            "title": "Trending Shows",
+            "id": "recommended_shows",
+            "title": "Recommended Shows",
             "source": "tmdb_query",
             "source_metadata": {"path": "/trending/tv/week", "parameters": ""},
             "content_type": "shows",
-        },
-        {
-            "id": "popular_movies",
-            "title": "Popular Movies",
-            "source": "tmdb_query",
-            "source_metadata": {"path": "/movie/popular", "parameters": ""},
-            "content_type": "movies",
-        },
-        {
-            "id": "popular_shows",
-            "title": "Popular Shows",
-            "source": "tmdb_query",
-            "source_metadata": {"path": "/tv/popular", "parameters": ""},
-            "content_type": "shows",
-        },
-        {
-            "id": "top_rated_movies",
-            "title": "Critically Acclaimed Movies",
-            "source": "tmdb_query",
-            "source_metadata": {"path": "/movie/top_rated", "parameters": ""},
-            "content_type": "movies",
         },
     ]

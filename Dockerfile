@@ -18,7 +18,7 @@ RUN pip install -r requirements.txt
 COPY app/ ./app/
 COPY static/ ./static/
 
-RUN mkdir -p /app/data/db /app/data/chroma
+RUN mkdir -p /app/data/db
 
 EXPOSE 8000
 
