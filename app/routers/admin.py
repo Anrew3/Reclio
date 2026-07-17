@@ -72,7 +72,9 @@ async def _run_content_sync_safe() -> None:
 
 async def _run_user_sync_safe(user_id: str) -> None:
     try:
-        await sync_one_user(user_id)
+        # An operator explicitly asked for this sync — bypass the
+        # cheap-poll short-circuit, same as the dashboard Refresh button.
+        await sync_one_user(user_id, force=True)
     except Exception as exc:  # noqa: BLE001
         logger.exception("admin: user sync failed for %s: %s", user_id, exc)
 

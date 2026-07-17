@@ -566,24 +566,48 @@ async def sync_one_user(user_id: str, *, force: bool = False) -> None:
             #    installs can have NULL list ids, which silently
             #    downgrades /feeds to the discover fallback — Chillio
             #    then never sees the engine's picks at all.
-            for field, name, desc in (
-                ("trakt_rec_movies_list_id", "Reclio • Recommended Movies",
-                 "Auto-updated by Reclio with movies you'll love."),
-                ("trakt_rec_shows_list_id", "Reclio • Recommended Shows",
-                 "Auto-updated by Reclio with shows you'll love."),
-            ):
-                if getattr(user, field, None):
-                    continue
+            #    ADOPT before creating: a re-installed instance usually
+            #    still has its old "Reclio • …" lists on Trakt; creating
+            #    blind makes duplicates and can trip Trakt's personal
+            #    list cap (HTTP 420).
+            heal_targets = [
+                (field, name, desc)
+                for field, name, desc in (
+                    ("trakt_rec_movies_list_id", "Reclio • Recommended Movies",
+                     "Auto-updated by Reclio with movies you'll love."),
+                    ("trakt_rec_shows_list_id", "Reclio • Recommended Shows",
+                     "Auto-updated by Reclio with shows you'll love."),
+                )
+                if not getattr(user, field, None)
+            ]
+            if heal_targets:
+                existing_by_name: dict[str, int] = {}
                 try:
-                    lst = await trakt.create_list(token, name, desc)
-                    lid = ((lst or {}).get("ids") or {}).get("trakt")
+                    for lst in await trakt.get_user_lists(token):
+                        lname = (lst.get("name") or "").strip().lower()
+                        lid = ((lst.get("ids") or {}).get("trakt"))
+                        if lname and lid and lname not in existing_by_name:
+                            existing_by_name[lname] = lid
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("user_sync: list scan failed for %s: %s",
+                                 user_id, exc)
+                for field, name, desc in heal_targets:
+                    lid = existing_by_name.get(name.lower())
                     if lid:
                         setattr(user, field, lid)
-                        logger.info("user_sync: created missing managed list "
+                        logger.info("user_sync: adopted existing managed list "
                                     "%s=%s for %s", field, lid, user_id)
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("user_sync: creating %s failed for %s: %s",
-                                   field, user_id, exc)
+                        continue
+                    try:
+                        lst = await trakt.create_list(token, name, desc)
+                        lid = ((lst or {}).get("ids") or {}).get("trakt")
+                        if lid:
+                            setattr(user, field, lid)
+                            logger.info("user_sync: created missing managed "
+                                        "list %s=%s for %s", field, lid, user_id)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("user_sync: creating %s failed for %s: %s",
+                                       field, user_id, exc)
 
             try:
                 await asyncio.gather(
