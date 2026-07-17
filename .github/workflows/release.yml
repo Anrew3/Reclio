@@ -1,16 +1,22 @@
 name: Release
 
-# Builds and publishes a multi-arch Docker image to GHCR whenever a
-# SemVer tag is pushed (v1.2.3) or a GitHub Release is published.
+# Builds and publishes a multi-arch Docker image to GHCR:
+#   - on every push to main  → updates the `latest` tag (continuous
+#     delivery — Portainer/watchtower instances tracking `latest` can
+#     re-pull right after a merge)
+#   - on SemVer tags (v1.2.3) or published GitHub Releases → publishes
+#     the version tags AND `latest`
 #
 # v1.6.0: switched from single-job multi-arch + QEMU emulation to
 # parallel native amd64 + arm64 jobs + a manifest-merge step.
 # Public-repo arm64 runners (`ubuntu-24.04-arm`) are free; running
 # arm64 natively instead of under QEMU drops release wall time from
-# ~30 min to ~5-8 min for our Python-heavy image (torch, chromadb).
+# ~30 min to ~5-8 min for our Python-heavy image.
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*.*.*"
   release:
@@ -105,7 +111,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') }}
+            type=sha,prefix=main-,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/') || github.ref == 'refs/heads/main' }}
 
       - name: Create + push multi-arch manifest
         # `imagetools create` stitches the two arch-suffixed tags into a
